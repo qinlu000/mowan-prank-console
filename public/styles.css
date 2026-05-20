@@ -425,11 +425,21 @@ textarea:focus {
 .typing {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 9px;
   padding: 10px 0;
+  color: var(--muted);
 }
 
-.typing span {
+.typing-label {
+  font-size: 0.95rem;
+}
+
+.typing-dots {
+  display: inline-flex;
+  gap: 5px;
+}
+
+.typing-dots i {
   width: 7px;
   height: 7px;
   border-radius: 50%;
@@ -437,11 +447,11 @@ textarea:focus {
   animation: pulse 1s ease-in-out infinite;
 }
 
-.typing span:nth-child(2) {
+.typing-dots i:nth-child(2) {
   animation-delay: 120ms;
 }
 
-.typing span:nth-child(3) {
+.typing-dots i:nth-child(3) {
   animation-delay: 240ms;
 }
 
@@ -473,11 +483,6 @@ textarea:focus {
   gap: 10px;
   margin: 0 auto;
   padding: 0 0 10px;
-}
-
-.generation-status {
-  color: var(--muted);
-  font-size: 0.88rem;
 }
 
 .secondary-action {

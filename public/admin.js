@@ -125,7 +125,16 @@ function createTypingRow() {
   row.className = "message-row assistant";
   const bubble = document.createElement("div");
   bubble.className = "bubble typing";
-  bubble.append(document.createElement("span"), document.createElement("span"), document.createElement("span"));
+
+  const label = document.createElement("span");
+  label.className = "typing-label";
+  label.textContent = "访客端正在显示思考中";
+
+  const dots = document.createElement("span");
+  dots.className = "typing-dots";
+  dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
+
+  bubble.append(label, dots);
   row.append(bubble);
   return row;
 }

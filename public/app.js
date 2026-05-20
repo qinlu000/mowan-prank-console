@@ -4,9 +4,9 @@ const composer = document.querySelector("#composer");
 const input = document.querySelector("#messageInput");
 const statusEl = document.querySelector("#connectionStatus");
 const newChatButton = document.querySelector("#newChatButton");
+const generationActions = document.querySelector("#generationActions");
 const stopButton = document.querySelector("#stopButton");
 const regenerateButton = document.querySelector("#regenerateButton");
-const actionStatus = document.querySelector("#actionStatus");
 
 let sessionId = getSessionId();
 let lastRenderSignature = "";
@@ -57,7 +57,8 @@ function createBubble(message) {
 
   const content = document.createElement("div");
   content.className = "message-content";
-  content.textContent = message.content;
+  content.textContent =
+    message.status === "streaming" && !message.content ? "正在生成回复" : message.content;
 
   bubble.append(meta, content);
   row.append(bubble);
@@ -72,7 +73,15 @@ function createTypingBubble() {
   bubble.className = "bubble typing";
   bubble.setAttribute("aria-label", "AstraChat 正在思考");
 
-  bubble.append(document.createElement("span"), document.createElement("span"), document.createElement("span"));
+  const label = document.createElement("span");
+  label.className = "typing-label";
+  label.textContent = "正在思考";
+
+  const dots = document.createElement("span");
+  dots.className = "typing-dots";
+  dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
+
+  bubble.append(label, dots);
   row.append(bubble);
   return row;
 }
@@ -81,16 +90,9 @@ function renderControls(session) {
   const hasSession = Boolean(session);
   stopButton.hidden = !hasSession || !session.isGenerating;
   regenerateButton.hidden = !hasSession || !session.canRegenerate || session.isGenerating;
+  generationActions.hidden = stopButton.hidden && regenerateButton.hidden;
 
-  const statusText = session?.isGenerating
-    ? "正在生成回复"
-    : session?.awaitingReply
-      ? "正在思考"
-      : "";
-
-  actionStatus.hidden = !statusText;
-  actionStatus.textContent = statusText;
-  statusEl.textContent = statusText || "在线";
+  statusEl.textContent = "在线";
 }
 
 function render(session) {
