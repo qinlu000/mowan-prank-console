@@ -9,6 +9,16 @@ $env:ADMIN_PASSWORD="换成你的后台密码"
 npm start
 ```
 
+## 内网穿透
+
+当前推荐使用 cpolar 便携版：
+
+```powershell
+.\scripts\start-cpolar.ps1 -AuthToken "你的 cpolar authtoken"
+```
+
+之后终端里显示的 `https://...` 地址就是访客公网地址。
+
 打开：
 
 - 访客页：http://127.0.0.1:5173/
