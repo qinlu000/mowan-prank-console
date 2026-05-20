@@ -1,6 +1,7 @@
 param(
   [string]$AuthToken,
   [int]$Port = 5173,
+  [string]$Region = "cn",
   [string]$CpolarPath = "C:\tmp\cpolar-portable\cpolar.exe"
 )
 
@@ -16,4 +17,4 @@ if ($AuthToken) {
   }
 }
 
-& $CpolarPath http $Port
+& $CpolarPath http -region=$Region -log=stdout $Port

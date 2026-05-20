@@ -17,7 +17,7 @@ npm start
 .\scripts\start-cpolar.ps1 -AuthToken "你的 cpolar authtoken"
 ```
 
-之后终端里显示的 `https://...` 地址就是访客公网地址。
+脚本默认使用中国节点。之后终端里显示的 `https://...` 地址就是访客公网地址。
 
 打开：
 
