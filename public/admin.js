@@ -16,6 +16,19 @@ let activeSessionId = null;
 let activeSignature = "";
 let typingTimer = null;
 
+function redirectToLogin() {
+  window.location.href = "/admin-login.html";
+}
+
+async function readPayload(response) {
+  const payload = await response.json();
+  if (response.status === 401) {
+    redirectToLogin();
+    throw new Error("需要后台登录");
+  }
+  return payload;
+}
+
 function formatTime(value) {
   return new Intl.DateTimeFormat("zh-CN", {
     hour: "2-digit",
@@ -214,7 +227,7 @@ function renderNoActiveSession() {
 
 async function fetchSessions() {
   const response = await fetch("/api/admin/sessions");
-  const payload = await response.json();
+  const payload = await readPayload(response);
   if (!response.ok) {
     throw new Error(payload.error || "无法读取会话");
   }
@@ -233,7 +246,7 @@ async function fetchActiveSession() {
   }
 
   const response = await fetch(`/api/admin/sessions/${encodeURIComponent(activeSessionId)}`);
-  const payload = await response.json();
+  const payload = await readPayload(response);
   if (!response.ok) {
     throw new Error(payload.error || "无法读取当前会话");
   }
@@ -262,11 +275,12 @@ async function setTyping(typing) {
     return;
   }
 
-  await fetch(`/api/admin/sessions/${encodeURIComponent(activeSessionId)}/typing`, {
+  const response = await fetch(`/api/admin/sessions/${encodeURIComponent(activeSessionId)}/typing`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ typing })
   });
+  await readPayload(response);
 }
 
 function announceTyping() {
@@ -286,7 +300,7 @@ async function sendReply(content) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content, delayMs })
   });
-  const payload = await response.json();
+  const payload = await readPayload(response);
   if (!response.ok) {
     throw new Error(payload.error || "回复失败");
   }
@@ -335,11 +349,12 @@ revealButton.addEventListener("click", async () => {
 
   revealButton.disabled = true;
   try {
-    await fetch(`/api/admin/sessions/${encodeURIComponent(activeSessionId)}/reveal`, {
+    const response = await fetch(`/api/admin/sessions/${encodeURIComponent(activeSessionId)}/reveal`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}"
     });
+    await readPayload(response);
     await refreshAll();
   } finally {
     revealButton.disabled = false;

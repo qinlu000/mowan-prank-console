@@ -5,6 +5,7 @@
 ## 运行
 
 ```powershell
+$env:ADMIN_PASSWORD="换成你的后台密码"
 npm start
 ```
 
@@ -17,6 +18,7 @@ npm start
 
 - 访客聊天页面
 - 后台会话列表
+- 后台登录保护，密码通过 `ADMIN_PASSWORD` 设置
 - 手动扮演 AstraChat 回复
 - “正在输入”状态
 - 访客发送后自动进入“正在思考”

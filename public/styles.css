@@ -36,6 +36,7 @@ body {
 
 button,
 textarea,
+input,
 select {
   font: inherit;
 }
@@ -161,6 +162,22 @@ textarea:focus {
   box-shadow: 0 0 0 3px var(--focus);
 }
 
+input {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 12px;
+  color: var(--text);
+  outline: none;
+  background: var(--surface);
+}
+
+input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
 .send-button {
   display: inline-flex;
   align-items: center;
@@ -178,6 +195,51 @@ textarea:focus {
 .chat-page {
   min-height: 100vh;
   background: var(--bg);
+}
+
+.auth-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #f4f6f8;
+}
+
+.auth-panel {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 24px;
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.auth-brand {
+  justify-content: center;
+}
+
+.auth-form {
+  display: grid;
+  gap: 10px;
+}
+
+.auth-form label {
+  color: var(--text);
+  font-size: 0.92rem;
+  font-weight: 650;
+}
+
+.auth-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.88rem;
+}
+
+.auth-submit {
+  min-height: 42px;
+  margin-top: 6px;
 }
 
 .chat-shell {

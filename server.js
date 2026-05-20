@@ -1,14 +1,18 @@
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
-const { randomUUID } = require("node:crypto");
+const { randomUUID, timingSafeEqual } = require("node:crypto");
 
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 5173);
 const publicDir = path.resolve(__dirname, "public");
 const newVisitorTitle = "新访客";
+const adminCookieName = "astrachat_admin";
+const generatedAdminPassword = randomUUID().slice(0, 12);
+const adminPassword = process.env.ADMIN_PASSWORD || generatedAdminPassword;
 
 const sessions = new Map();
+const adminTokens = new Set();
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -155,6 +159,55 @@ function sendError(res, status, message) {
   sendJson(res, status, { error: message });
 }
 
+function redirect(res, location) {
+  res.writeHead(302, {
+    Location: location,
+    "Cache-Control": "no-store"
+  });
+  res.end();
+}
+
+function parseCookies(req) {
+  const header = req.headers.cookie || "";
+  const cookies = new Map();
+  for (const part of header.split(";")) {
+    const [rawName, ...rawValue] = part.trim().split("=");
+    if (!rawName) {
+      continue;
+    }
+    cookies.set(rawName, decodeURIComponent(rawValue.join("=")));
+  }
+  return cookies;
+}
+
+function safeEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left));
+  const rightBuffer = Buffer.from(String(right));
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+  return timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function isAdminAuthenticated(req) {
+  const token = parseCookies(req).get(adminCookieName);
+  return Boolean(token && adminTokens.has(token));
+}
+
+function setAdminCookie(res, token) {
+  res.setHeader(
+    "Set-Cookie",
+    `${adminCookieName}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`
+  );
+}
+
+function clearAdminCookie(res) {
+  res.setHeader(
+    "Set-Cookie",
+    `${adminCookieName}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`
+  );
+}
+
 function readJson(req) {
   return new Promise((resolve, reject) => {
     let body = "";
@@ -236,6 +289,34 @@ function parseAdminPath(pathname) {
     sessionId: match[1] || null,
     action: match[2] || null
   };
+}
+
+async function handleAdminLogin(req, res) {
+  if (req.method !== "POST") {
+    sendError(res, 405, "方法不允许");
+    return;
+  }
+
+  const body = await readJson(req);
+  const password = String(body.password || "");
+  if (!safeEqual(password, adminPassword)) {
+    sendError(res, 401, "后台密码不正确");
+    return;
+  }
+
+  const token = randomUUID();
+  adminTokens.add(token);
+  setAdminCookie(res, token);
+  sendJson(res, 200, { ok: true });
+}
+
+function handleAdminLogout(req, res) {
+  const token = parseCookies(req).get(adminCookieName);
+  if (token) {
+    adminTokens.delete(token);
+  }
+  clearAdminCookie(res);
+  sendJson(res, 200, { ok: true });
 }
 
 function clearGenerationTimer(session) {
@@ -563,12 +644,36 @@ async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || `${host}:${port}`}`);
 
   try {
+    if (url.pathname === "/admin.html" && !isAdminAuthenticated(req)) {
+      redirect(res, "/admin-login.html");
+      return;
+    }
+
+    if (url.pathname === "/admin-login.html" && isAdminAuthenticated(req)) {
+      redirect(res, "/admin.html");
+      return;
+    }
+
     if (url.pathname.startsWith("/api/chat/")) {
       await handleChatApi(req, res, url.pathname);
       return;
     }
 
+    if (url.pathname === "/api/admin/login") {
+      await handleAdminLogin(req, res);
+      return;
+    }
+
+    if (url.pathname === "/api/admin/logout") {
+      handleAdminLogout(req, res);
+      return;
+    }
+
     if (url.pathname.startsWith("/api/admin/")) {
+      if (!isAdminAuthenticated(req)) {
+        sendError(res, 401, "需要后台登录");
+        return;
+      }
       await handleAdminApi(req, res, url.pathname);
       return;
     }
@@ -585,6 +690,9 @@ server.listen(port, host, () => {
   console.log(`AstraChat prank server is running at http://${host}:${port}`);
   console.log(`Visitor page: http://${host}:${port}/`);
   console.log(`Admin console: http://${host}:${port}/admin.html`);
+  if (!process.env.ADMIN_PASSWORD) {
+    console.log(`Generated admin password: ${adminPassword}`);
+  }
 });
 
 process.on("SIGINT", () => {

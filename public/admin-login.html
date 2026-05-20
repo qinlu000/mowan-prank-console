@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AstraChat 后台登录</title>
+    <link rel="icon" href="/logo.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/admin-login.js" defer></script>
+  </head>
+  <body class="auth-page">
+    <main class="auth-panel">
+      <div class="brand auth-brand">
+        <img src="/logo.svg" alt="" class="brand-mark">
+        <div>
+          <div class="brand-name">AstraChat</div>
+          <div class="brand-subtitle">后台控制台</div>
+        </div>
+      </div>
+
+      <form class="auth-form" id="loginForm">
+        <label for="passwordInput">后台密码</label>
+        <input id="passwordInput" name="password" type="password" autocomplete="current-password" autofocus>
+        <p class="auth-error" id="loginError" role="alert" hidden></p>
+        <button class="send-button auth-submit" type="submit">进入后台</button>
+      </form>
+    </main>
+  </body>
+</html>
