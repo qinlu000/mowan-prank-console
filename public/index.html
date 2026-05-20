@@ -10,32 +10,62 @@
   </head>
   <body class="chat-page">
     <main class="chat-shell" aria-label="AstraChat 聊天">
-      <header class="chat-header">
-        <div class="brand">
-          <img src="/logo.svg" alt="" class="brand-mark">
-          <div>
-            <div class="brand-name">AstraChat</div>
-            <div class="brand-subtitle" id="connectionStatus">正在连接</div>
+      <aside class="chat-sidebar" aria-label="对话导航">
+        <div class="sidebar-top">
+          <button class="new-chat-button" id="newChatButton" type="button">
+            <span aria-hidden="true">+</span>
+            <span>新对话</span>
+          </button>
+        </div>
+
+        <nav class="conversation-nav" aria-label="最近对话">
+          <button class="conversation-item active" type="button">
+            <span class="conversation-dot" aria-hidden="true"></span>
+            <span>当前对话</span>
+          </button>
+          <button class="conversation-item" type="button">
+            <span class="conversation-dot" aria-hidden="true"></span>
+            <span>创意问题</span>
+          </button>
+          <button class="conversation-item" type="button">
+            <span class="conversation-dot" aria-hidden="true"></span>
+            <span>日常助手</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="mini-profile">
+            <span class="mini-avatar" aria-hidden="true">A</span>
+            <span>AstraChat</span>
           </div>
         </div>
-        <button class="ghost-button" id="newChatButton" type="button">新对话</button>
-      </header>
+      </aside>
 
-      <section class="messages" id="messages" aria-live="polite"></section>
+      <section class="chat-main">
+        <header class="chat-header">
+          <button class="model-pill" type="button">
+            <span>AstraChat</span>
+            <span class="chevron" aria-hidden="true">⌄</span>
+          </button>
+          <div class="brand-subtitle" id="connectionStatus">正在连接</div>
+        </header>
 
-      <section class="suggestions" aria-label="示例问题">
-        <button type="button" data-suggestion="你能用很自然的语气安慰我一下吗？">安慰我一下</button>
-        <button type="button" data-suggestion="帮我想一个今天晚上发朋友圈的文案。">朋友圈文案</button>
-        <button type="button" data-suggestion="我想问一个很怪的问题，你先别笑。">怪问题</button>
+        <section class="messages" id="messages" aria-live="polite"></section>
+
+        <section class="suggestions" aria-label="示例问题">
+          <button type="button" data-suggestion="你能用很自然的语气安慰我一下吗？">安慰我一下</button>
+          <button type="button" data-suggestion="帮我想一个今天晚上发朋友圈的文案。">朋友圈文案</button>
+          <button type="button" data-suggestion="我想问一个很怪的问题，你先别笑。">怪问题</button>
+        </section>
+
+        <form class="composer" id="composer">
+          <label class="visually-hidden" for="messageInput">输入消息</label>
+          <textarea id="messageInput" rows="1" placeholder="给 AstraChat 发送消息" maxlength="2000"></textarea>
+          <button class="send-button" type="submit" aria-label="发送">
+            <span aria-hidden="true">↑</span>
+          </button>
+        </form>
       </section>
-
-      <form class="composer" id="composer">
-        <label class="visually-hidden" for="messageInput">输入消息</label>
-        <textarea id="messageInput" rows="1" placeholder="给 AstraChat 发送消息" maxlength="2000"></textarea>
-        <button class="send-button" type="submit" aria-label="发送">
-          <span>发送</span>
-        </button>
-      </form>
     </main>
   </body>
 </html>
