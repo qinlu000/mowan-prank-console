@@ -6,6 +6,7 @@ const { randomUUID } = require("node:crypto");
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 5173);
 const publicDir = path.resolve(__dirname, "public");
+const newVisitorTitle = "新访客";
 
 const sessions = new Map();
 
@@ -22,12 +23,26 @@ function now() {
   return new Date().toISOString();
 }
 
-function createMessage(role, content) {
+function createMessage(role, content, extra = {}) {
   return {
     id: randomUUID(),
     role,
-    content: String(content).trim(),
-    createdAt: now()
+    content: String(content),
+    createdAt: now(),
+    updatedAt: now(),
+    status: "complete",
+    ...extra
+  };
+}
+
+function serializeMessage(message) {
+  return {
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    createdAt: message.createdAt,
+    updatedAt: message.updatedAt || message.createdAt,
+    status: message.status || "complete"
   };
 }
 
@@ -44,12 +59,14 @@ function getSession(id) {
     const createdAt = now();
     sessions.set(id, {
       id,
-      title: "新访客",
+      title: newVisitorTitle,
       createdAt,
       updatedAt: createdAt,
       lastSeenAt: createdAt,
       adminTyping: false,
       revealed: false,
+      regenerateRequest: null,
+      generation: null,
       pendingTimers: new Set(),
       messages: [
         createMessage(
@@ -67,6 +84,21 @@ function touch(session) {
   session.updatedAt = now();
 }
 
+function lastAssistantMessage(session) {
+  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+    const message = session.messages[index];
+    if (message.role === "assistant") {
+      return message;
+    }
+  }
+  return null;
+}
+
+function canRegenerate(session) {
+  const lastAssistant = lastAssistantMessage(session);
+  return Boolean(lastAssistant && !session.generation && !session.adminTyping);
+}
+
 function summarizeSession(session) {
   const last = session.messages[session.messages.length - 1];
   const userMessages = session.messages.filter((message) => message.role === "user");
@@ -77,6 +109,9 @@ function summarizeSession(session) {
     updatedAt: session.updatedAt,
     lastSeenAt: session.lastSeenAt,
     adminTyping: session.adminTyping,
+    isGenerating: session.generation?.type === "stream",
+    regenerateRequested: Boolean(session.regenerateRequest),
+    regenerateRequest: session.regenerateRequest,
     revealed: session.revealed,
     messageCount: session.messages.length,
     userMessageCount: userMessages.length,
@@ -84,18 +119,25 @@ function summarizeSession(session) {
       ? {
           role: last.role,
           content: last.content,
-          createdAt: last.createdAt
+          createdAt: last.createdAt,
+          status: last.status || "complete"
         }
       : null
   };
 }
 
 function publicSession(session) {
+  const isGenerating = session.generation?.type === "stream";
+  const awaitingReply = Boolean(session.adminTyping && !isGenerating);
+
   return {
     id: session.id,
     title: session.title,
-    messages: session.messages,
-    typing: session.adminTyping,
+    messages: session.messages.map(serializeMessage),
+    typing: awaitingReply,
+    awaitingReply,
+    isGenerating,
+    canRegenerate: canRegenerate(session),
     revealed: session.revealed
   };
 }
@@ -173,14 +215,14 @@ function sendStatic(urlPath, res) {
 }
 
 function parseChatPath(pathname) {
-  const match = pathname.match(/^\/api\/chat\/([^/]+)(?:\/messages)?$/);
+  const match = pathname.match(/^\/api\/chat\/([^/]+)(?:\/(messages|stop|regenerate))?$/);
   if (!match) {
     return null;
   }
 
   return {
     sessionId: match[1],
-    isMessagesPath: pathname.endsWith("/messages")
+    action: match[2] || null
   };
 }
 
@@ -194,6 +236,156 @@ function parseAdminPath(pathname) {
     sessionId: match[1] || null,
     action: match[2] || null
   };
+}
+
+function clearGenerationTimer(session) {
+  if (!session.generation?.timer) {
+    return;
+  }
+
+  clearTimeout(session.generation.timer);
+  session.pendingTimers.delete(session.generation.timer);
+  session.generation.timer = null;
+}
+
+function stopActiveGeneration(session, status = "stopped") {
+  if (!session.generation) {
+    return false;
+  }
+
+  clearGenerationTimer(session);
+
+  if (session.generation.messageId) {
+    const message = session.messages.find((item) => item.id === session.generation.messageId);
+    if (message && message.status === "streaming") {
+      message.status = status;
+      message.updatedAt = now();
+    }
+  }
+
+  session.generation = null;
+  session.adminTyping = false;
+  touch(session);
+  return true;
+}
+
+function nextChunkSize(target, index) {
+  const remaining = target.length - index;
+  if (remaining <= 0) {
+    return 0;
+  }
+
+  if (target[index] === "\n") {
+    return 1;
+  }
+
+  const base = target.length > 800 ? 4 : 1;
+  const spread = target.length > 800 ? 5 : 3;
+  return Math.min(remaining, base + Math.floor(Math.random() * spread));
+}
+
+function nextStreamDelay(target, index) {
+  const current = target[index] || "";
+  if (current === "\n") {
+    return 180 + Math.floor(Math.random() * 160);
+  }
+  if (/[，。！？,.!?]/.test(current)) {
+    return 120 + Math.floor(Math.random() * 120);
+  }
+  return 32 + Math.floor(Math.random() * 54);
+}
+
+function queueStreamStep(session) {
+  const generation = session.generation;
+  if (!generation) {
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    session.pendingTimers.delete(timer);
+
+    if (session.generation !== generation) {
+      return;
+    }
+
+    const message = session.messages.find((item) => item.id === generation.messageId);
+    if (!message || message.status !== "streaming") {
+      session.generation = null;
+      session.adminTyping = false;
+      touch(session);
+      return;
+    }
+
+    const chunkSize = nextChunkSize(generation.target, generation.index);
+    message.content += generation.target.slice(generation.index, generation.index + chunkSize);
+    generation.index += chunkSize;
+    message.updatedAt = now();
+
+    if (generation.index >= generation.target.length) {
+      message.status = "complete";
+      session.generation = null;
+      session.adminTyping = false;
+      touch(session);
+      return;
+    }
+
+    touch(session);
+    queueStreamStep(session);
+  }, nextStreamDelay(generation.target, generation.index));
+
+  generation.timer = timer;
+  session.pendingTimers.add(timer);
+}
+
+function startStreamingReply(session, content) {
+  const message = createMessage("assistant", "", { status: "streaming" });
+  session.messages.push(message);
+  session.adminTyping = false;
+  session.regenerateRequest = null;
+  session.generation = {
+    type: "stream",
+    messageId: message.id,
+    target: content,
+    index: 0,
+    timer: null
+  };
+  touch(session);
+  queueStreamStep(session);
+}
+
+function queueReply(session, content, delayMs) {
+  stopActiveGeneration(session, "stopped");
+  session.adminTyping = true;
+  touch(session);
+
+  if (delayMs <= 0) {
+    startStreamingReply(session, content);
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    session.pendingTimers.delete(timer);
+    if (!session.generation || session.generation.timer !== timer) {
+      return;
+    }
+    session.generation = null;
+    startStreamingReply(session, content);
+  }, delayMs);
+
+  session.generation = {
+    type: "delay",
+    messageId: null,
+    target: content,
+    index: 0,
+    timer
+  };
+  session.pendingTimers.add(timer);
+}
+
+function clearManualTyping(session) {
+  if (!session.generation) {
+    session.adminTyping = false;
+  }
 }
 
 async function handleChatApi(req, res, pathname) {
@@ -211,12 +403,12 @@ async function handleChatApi(req, res, pathname) {
 
   session.lastSeenAt = now();
 
-  if (req.method === "GET" && !chatPath.isMessagesPath) {
+  if (req.method === "GET" && !chatPath.action) {
     sendJson(res, 200, publicSession(session));
     return;
   }
 
-  if (req.method === "POST" && chatPath.isMessagesPath) {
+  if (req.method === "POST" && chatPath.action === "messages") {
     const body = await readJson(req);
     const content = String(body.content || "").trim();
     if (!content) {
@@ -229,13 +421,40 @@ async function handleChatApi(req, res, pathname) {
       return;
     }
 
+    stopActiveGeneration(session, "stopped");
     session.messages.push(createMessage("user", content));
-    if (session.title === "新访客") {
+    if (session.title === newVisitorTitle) {
       session.title = content.length > 28 ? `${content.slice(0, 28)}...` : content;
     }
-    session.adminTyping = false;
+    session.regenerateRequest = null;
+    session.adminTyping = true;
     touch(session);
     sendJson(res, 201, publicSession(session));
+    return;
+  }
+
+  if (req.method === "POST" && chatPath.action === "stop") {
+    const stopped = stopActiveGeneration(session, "stopped");
+    sendJson(res, 200, { ok: true, stopped, session: publicSession(session) });
+    return;
+  }
+
+  if (req.method === "POST" && chatPath.action === "regenerate") {
+    const lastAssistant = lastAssistantMessage(session);
+    if (!lastAssistant) {
+      sendError(res, 400, "还没有可重新生成的回复");
+      return;
+    }
+
+    stopActiveGeneration(session, "stopped");
+    session.regenerateRequest = {
+      id: randomUUID(),
+      createdAt: now(),
+      previousMessageId: lastAssistant.id
+    };
+    session.adminTyping = true;
+    touch(session);
+    sendJson(res, 200, { ok: true, session: publicSession(session) });
     return;
   }
 
@@ -272,7 +491,8 @@ async function handleAdminApi(req, res, pathname) {
     sendJson(res, 200, {
       session: {
         ...summarizeSession(session),
-        messages: session.messages
+        canRegenerate: canRegenerate(session),
+        messages: session.messages.map(serializeMessage)
       }
     });
     return;
@@ -286,6 +506,11 @@ async function handleAdminApi(req, res, pathname) {
   const body = await readJson(req);
 
   if (adminPath.action === "typing") {
+    if (session.generation) {
+      sendJson(res, 200, { ok: true, typing: false });
+      return;
+    }
+
     session.adminTyping = Boolean(body.typing);
     touch(session);
     sendJson(res, 200, { ok: true, typing: session.adminTyping });
@@ -305,28 +530,19 @@ async function handleAdminApi(req, res, pathname) {
     }
 
     const delayMs = Math.max(0, Math.min(Number(body.delayMs || 0), 8000));
-    if (delayMs > 0) {
-      session.adminTyping = true;
-      touch(session);
-      const timer = setTimeout(() => {
-        session.pendingTimers.delete(timer);
-        session.messages.push(createMessage("assistant", content));
-        session.adminTyping = false;
-        touch(session);
-      }, delayMs);
-      session.pendingTimers.add(timer);
-      sendJson(res, 202, { ok: true, queued: true, delayMs });
-      return;
-    }
-
-    session.messages.push(createMessage("assistant", content));
-    session.adminTyping = false;
-    touch(session);
-    sendJson(res, 201, { ok: true, session: summarizeSession(session) });
+    queueReply(session, content, delayMs);
+    sendJson(res, delayMs > 0 ? 202 : 201, {
+      ok: true,
+      queued: delayMs > 0,
+      streaming: delayMs <= 0,
+      delayMs,
+      session: summarizeSession(session)
+    });
     return;
   }
 
   if (adminPath.action === "reveal") {
+    stopActiveGeneration(session, "stopped");
     session.messages.push(
       createMessage(
         "assistant",
@@ -334,7 +550,7 @@ async function handleAdminApi(req, res, pathname) {
       )
     );
     session.revealed = true;
-    session.adminTyping = false;
+    clearManualTyping(session);
     touch(session);
     sendJson(res, 201, { ok: true, revealed: true });
     return;

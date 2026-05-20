@@ -4,10 +4,14 @@ const composer = document.querySelector("#composer");
 const input = document.querySelector("#messageInput");
 const statusEl = document.querySelector("#connectionStatus");
 const newChatButton = document.querySelector("#newChatButton");
+const stopButton = document.querySelector("#stopButton");
+const regenerateButton = document.querySelector("#regenerateButton");
+const actionStatus = document.querySelector("#actionStatus");
 
 let sessionId = getSessionId();
 let lastRenderSignature = "";
 let isSending = false;
+let latestSession = null;
 
 function getSessionId() {
   const existing = localStorage.getItem(storageKey);
@@ -25,6 +29,7 @@ function getSessionId() {
 function resetChat() {
   localStorage.removeItem(storageKey);
   sessionId = getSessionId();
+  latestSession = null;
   lastRenderSignature = "";
   input.value = "";
   input.style.height = "auto";
@@ -41,15 +46,17 @@ function formatTime(value) {
 function createBubble(message) {
   const row = document.createElement("article");
   row.className = `message-row ${message.role}`;
+  row.dataset.status = message.status || "complete";
 
   const bubble = document.createElement("div");
-  bubble.className = "bubble";
+  bubble.className = `bubble ${message.status || "complete"}`;
 
   const meta = document.createElement("div");
   meta.className = "message-meta";
   meta.textContent = `${message.role === "user" ? "你" : "AstraChat"} · ${formatTime(message.createdAt)}`;
 
   const content = document.createElement("div");
+  content.className = "message-content";
   content.textContent = message.content;
 
   bubble.append(meta, content);
@@ -63,24 +70,45 @@ function createTypingBubble() {
 
   const bubble = document.createElement("div");
   bubble.className = "bubble typing";
-  bubble.setAttribute("aria-label", "AstraChat 正在输入");
+  bubble.setAttribute("aria-label", "AstraChat 正在思考");
 
   bubble.append(document.createElement("span"), document.createElement("span"), document.createElement("span"));
   row.append(bubble);
   return row;
 }
 
+function renderControls(session) {
+  const hasSession = Boolean(session);
+  stopButton.hidden = !hasSession || !session.isGenerating;
+  regenerateButton.hidden = !hasSession || !session.canRegenerate || session.isGenerating;
+
+  const statusText = session?.isGenerating
+    ? "正在生成回复"
+    : session?.awaitingReply
+      ? "正在思考"
+      : "";
+
+  actionStatus.hidden = !statusText;
+  actionStatus.textContent = statusText;
+  statusEl.textContent = statusText || "在线";
+}
+
 function render(session) {
+  latestSession = session;
+  renderControls(session);
+
   const signature = JSON.stringify({
-    ids: session.messages.map((message) => `${message.id}:${message.content}`),
-    typing: session.typing
+    ids: session.messages.map((message) => `${message.id}:${message.content}:${message.status}`),
+    typing: session.typing,
+    isGenerating: session.isGenerating,
+    canRegenerate: session.canRegenerate
   });
   if (signature === lastRenderSignature) {
     return;
   }
 
   const shouldStickToBottom =
-    messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 140;
+    messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 160;
 
   messagesEl.replaceChildren(...session.messages.map(createBubble));
   if (session.typing) {
@@ -102,7 +130,6 @@ async function fetchState() {
       throw new Error(session.error || "连接失败");
     }
 
-    statusEl.textContent = session.typing ? "正在生成回复" : "在线";
     render(session);
   } catch (error) {
     statusEl.textContent = "连接中断";
@@ -132,6 +159,45 @@ async function sendMessage(content) {
     input.focus();
   } finally {
     isSending = false;
+  }
+}
+
+async function stopGeneration() {
+  if (!latestSession?.isGenerating) {
+    return;
+  }
+
+  const response = await fetch(`/api/chat/${encodeURIComponent(sessionId)}/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}"
+  });
+  const payload = await response.json();
+  if (response.ok && payload.session) {
+    render(payload.session);
+  }
+}
+
+async function regenerateReply() {
+  if (!latestSession?.canRegenerate || latestSession?.isGenerating) {
+    return;
+  }
+
+  regenerateButton.disabled = true;
+  try {
+    const response = await fetch(`/api/chat/${encodeURIComponent(sessionId)}/regenerate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "重新生成失败");
+    }
+
+    render(payload.session);
+  } finally {
+    regenerateButton.disabled = false;
   }
 }
 
@@ -165,6 +231,8 @@ document.querySelectorAll("[data-suggestion]").forEach((button) => {
 });
 
 newChatButton.addEventListener("click", resetChat);
+stopButton.addEventListener("click", stopGeneration);
+regenerateButton.addEventListener("click", regenerateReply);
 
 fetchState();
-setInterval(fetchState, 900);
+setInterval(fetchState, 420);

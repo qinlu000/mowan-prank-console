@@ -36,6 +36,18 @@ function relativeTime(value) {
 }
 
 function previewText(session) {
+  if (session.regenerateRequested) {
+    return "访客请求重新生成上一条回复";
+  }
+
+  if (session.isGenerating) {
+    return "正在流式输出回复";
+  }
+
+  if (session.adminTyping) {
+    return "访客正在等待回复";
+  }
+
   if (!session.lastMessage) {
     return "暂无消息";
   }
@@ -59,6 +71,7 @@ function renderSessionList() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `session-item${session.id === activeSessionId ? " active" : ""}`;
+    button.dataset.waiting = session.adminTyping || session.regenerateRequested ? "true" : "false";
     button.addEventListener("click", () => selectSession(session.id));
 
     const title = document.createElement("div");
@@ -89,15 +102,17 @@ function renderSessionList() {
 function createMessageRow(message) {
   const row = document.createElement("article");
   row.className = `message-row ${message.role}`;
+  row.dataset.status = message.status || "complete";
 
   const bubble = document.createElement("div");
-  bubble.className = "bubble";
+  bubble.className = `bubble ${message.status || "complete"}`;
 
   const meta = document.createElement("div");
   meta.className = "message-meta";
   meta.textContent = `${message.role === "user" ? "访客" : "AstraChat"} · ${formatTime(message.createdAt)}`;
 
   const content = document.createElement("div");
+  content.className = "message-content";
   content.textContent = message.content;
 
   bubble.append(meta, content);
@@ -115,6 +130,16 @@ function createTypingRow() {
   return row;
 }
 
+function createSystemNotice(text) {
+  const row = document.createElement("article");
+  row.className = "message-row system";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = text;
+  row.append(bubble);
+  return row;
+}
+
 function setComposerEnabled(enabled) {
   replyInput.disabled = !enabled;
   replyButton.disabled = !enabled;
@@ -123,13 +148,25 @@ function setComposerEnabled(enabled) {
 
 function renderActiveSession(session) {
   activeTitleEl.textContent = session.title || "新访客";
-  activeMetaEl.textContent = `${session.messageCount} 条消息 · 最近更新 ${formatTime(session.updatedAt)}`;
+
+  if (session.regenerateRequest) {
+    activeMetaEl.textContent = `访客请求重新生成 · ${formatTime(session.regenerateRequest.createdAt)}`;
+  } else if (session.isGenerating) {
+    activeMetaEl.textContent = "回复正在流式输出到访客端";
+  } else if (session.adminTyping) {
+    activeMetaEl.textContent = "访客端正在显示思考中";
+  } else {
+    activeMetaEl.textContent = `${session.messageCount} 条消息 · 最近更新 ${formatTime(session.updatedAt)}`;
+  }
+
   setComposerEnabled(true);
 
   const signature = JSON.stringify({
-    ids: session.messages.map((message) => `${message.id}:${message.content}`),
+    ids: session.messages.map((message) => `${message.id}:${message.content}:${message.status}`),
     typing: session.adminTyping,
-    revealed: session.revealed
+    generating: session.isGenerating,
+    revealed: session.revealed,
+    regenerate: session.regenerateRequest?.id || ""
   });
   if (signature === activeSignature) {
     return;
@@ -139,9 +176,12 @@ function renderActiveSession(session) {
     adminMessagesEl.scrollHeight - adminMessagesEl.scrollTop - adminMessagesEl.clientHeight < 180;
 
   const rows = session.messages.map(createMessageRow);
-  if (session.adminTyping) {
+  if (session.regenerateRequest) {
+    rows.push(createSystemNotice("访客点击了重新生成。你可以基于同一个问题再发一版更像 AI 的回复。"));
+  } else if (session.adminTyping && !session.isGenerating) {
     rows.push(createTypingRow());
   }
+
   adminMessagesEl.replaceChildren(...rows);
 
   if (shouldStickToBottom) {
@@ -301,4 +341,4 @@ refreshButton.addEventListener("click", refreshAll);
 
 renderNoActiveSession();
 refreshAll();
-setInterval(refreshAll, 1000);
+setInterval(refreshAll, 600);

@@ -52,6 +52,12 @@
 
         <section class="messages" id="messages" aria-live="polite"></section>
 
+        <section class="generation-actions" aria-live="polite">
+          <span class="generation-status" id="actionStatus" hidden></span>
+          <button class="secondary-action" id="stopButton" type="button" hidden>停止生成</button>
+          <button class="secondary-action" id="regenerateButton" type="button" hidden>重新生成</button>
+        </section>
+
         <section class="suggestions" aria-label="示例问题">
           <button type="button" data-suggestion="你能用很自然的语气安慰我一下吗？">安慰我一下</button>
           <button type="button" data-suggestion="帮我想一个今天晚上发朋友圈的文案。">朋友圈文案</button>
@@ -61,7 +67,7 @@
         <form class="composer" id="composer">
           <label class="visually-hidden" for="messageInput">输入消息</label>
           <textarea id="messageInput" rows="1" placeholder="给 AstraChat 发送消息" maxlength="2000"></textarea>
-          <button class="send-button" type="submit" aria-label="发送">
+          <button class="send-button" id="sendButton" type="submit" aria-label="发送">
             <span aria-hidden="true">↑</span>
           </button>
         </form>
