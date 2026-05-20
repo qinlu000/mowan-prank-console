@@ -5,7 +5,8 @@
   "description": "A local fake LLM chat site with a human-operated admin console.",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "check": "node --check server.js && node --check public/app.js && node --check public/admin.js && node --check public/admin-login.js"
   },
   "engines": {
     "node": ">=20"

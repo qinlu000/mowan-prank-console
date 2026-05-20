@@ -1,7 +1,12 @@
 node_modules/
 .env
+.env.*
+!.env.example
 *.log
 dist/
 coverage/
 .DS_Store
 Thumbs.db
+*.zip
+*.msi
+cpolar.yml
