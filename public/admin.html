@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AstraChat 控制台</title>
+    <link rel="icon" href="/logo.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/admin.js" defer></script>
+  </head>
+  <body class="admin-page">
+    <main class="admin-shell">
+      <aside class="session-sidebar">
+        <header class="admin-topbar">
+          <div class="brand">
+            <img src="/logo.svg" alt="" class="brand-mark">
+            <div>
+              <div class="brand-name">AstraChat</div>
+              <div class="brand-subtitle">后台控制台</div>
+            </div>
+          </div>
+          <a class="ghost-button" href="/" target="_blank" rel="noreferrer">访客页</a>
+        </header>
+        <div class="session-toolbar">
+          <div>
+            <div class="panel-title">会话</div>
+            <div class="muted" id="sessionCount">0 个访客</div>
+          </div>
+          <button class="icon-button" id="refreshButton" type="button" title="刷新">刷新</button>
+        </div>
+        <div class="session-list" id="sessionList"></div>
+      </aside>
+
+      <section class="operator-panel">
+        <header class="operator-header">
+          <div>
+            <div class="panel-title" id="activeTitle">等待访客</div>
+            <div class="muted" id="activeMeta">打开访客页后，这里会出现新的会话。</div>
+          </div>
+          <button class="danger-button" id="revealButton" type="button" disabled>摊牌</button>
+        </header>
+
+        <section class="admin-messages" id="adminMessages" aria-live="polite"></section>
+
+        <section class="quick-replies" aria-label="快捷回复">
+          <button type="button" data-reply="这个问题很有意思。我的第一反应是：">自然开头</button>
+          <button type="button" data-reply="我需要先确认一个细节：">追问细节</button>
+          <button type="button" data-reply="如果用更像人的话说，就是：">像人一点</button>
+          <button type="button" data-reply="短答案：">短答案</button>
+        </section>
+
+        <form class="reply-box" id="replyForm">
+          <label class="visually-hidden" for="replyInput">后台回复</label>
+          <textarea id="replyInput" rows="4" placeholder="在这里输入你要假装 LLM 发出的回复" maxlength="4000" disabled></textarea>
+          <div class="reply-actions">
+            <label class="delay-control">
+              <input type="checkbox" id="delayToggle" checked>
+              <span>发送前显示正在输入</span>
+            </label>
+            <select id="delaySelect" aria-label="延迟时间">
+              <option value="1200">1.2 秒</option>
+              <option value="2500" selected>2.5 秒</option>
+              <option value="4500">4.5 秒</option>
+              <option value="0">不延迟</option>
+            </select>
+            <button class="send-button" id="replyButton" type="submit" disabled>发送回复</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>
