@@ -18,6 +18,8 @@ let activeSessionId = null;
 let activeSignature = "";
 let typingTimer = null;
 let currentAdmin = null;
+let adminEvents = null;
+let isRefreshing = false;
 
 function redirectToLogin() {
   window.location.href = "/admin-login.html";
@@ -324,6 +326,11 @@ async function fetchActiveSession() {
 }
 
 async function refreshAll() {
+  if (isRefreshing) {
+    return;
+  }
+
+  isRefreshing = true;
   try {
     if (!currentAdmin) {
       await fetchCurrentAdmin();
@@ -332,6 +339,57 @@ async function refreshAll() {
     await fetchActiveSession();
   } catch (error) {
     activeMetaEl.textContent = error.message;
+  } finally {
+    isRefreshing = false;
+  }
+}
+
+function applyAdminEvent(payload) {
+  if (Array.isArray(payload.sessions)) {
+    sessions = payload.sessions;
+    if (!activeSessionId && sessions.length) {
+      activeSessionId = sessions[0].id;
+    }
+    renderSessionList();
+  }
+
+  if (payload.session && payload.session.id === activeSessionId) {
+    renderActiveSession(payload.session);
+    return;
+  }
+
+  if (payload.changedSessionId && payload.changedSessionId === activeSessionId) {
+    fetchActiveSession();
+  } else if (activeSessionId && !payload.session) {
+    fetchActiveSession();
+  } else if (!activeSessionId) {
+    renderNoActiveSession();
+  }
+}
+
+function connectAdminEvents() {
+  if (!window.EventSource) {
+    return;
+  }
+
+  if (adminEvents) {
+    adminEvents.close();
+  }
+
+  adminEvents = new EventSource("/api/admin/events");
+  adminEvents.addEventListener("admin", (event) => {
+    applyAdminEvent(JSON.parse(event.data));
+  });
+  adminEvents.addEventListener("error", () => {
+    if (!isRefreshing) {
+      activeMetaEl.textContent = "事件流正在重连，已切到低频刷新兜底。";
+    }
+  });
+}
+
+function fallbackRefresh() {
+  if (!window.EventSource || !adminEvents || adminEvents.readyState !== EventSource.OPEN) {
+    refreshAll();
   }
 }
 
@@ -437,4 +495,5 @@ refreshButton.addEventListener("click", refreshAll);
 
 renderNoActiveSession();
 refreshAll();
-setInterval(refreshAll, 600);
+connectAdminEvents();
+setInterval(fallbackRefresh, 5000);

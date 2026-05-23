@@ -13,6 +13,7 @@ let sessionId = getSessionId();
 let lastRenderSignature = "";
 let isSending = false;
 let latestSession = null;
+let eventSource = null;
 
 for (const key of legacyStorageKeys) {
   localStorage.removeItem(key);
@@ -38,6 +39,7 @@ function resetChat() {
   lastRenderSignature = "";
   input.value = "";
   input.style.height = "auto";
+  connectEventStream();
   fetchState();
 }
 
@@ -143,6 +145,37 @@ async function fetchState() {
   }
 }
 
+function connectEventStream() {
+  if (!window.EventSource) {
+    return;
+  }
+
+  if (eventSource) {
+    eventSource.close();
+  }
+
+  eventSource = new EventSource(`/api/chat/${encodeURIComponent(sessionId)}/events`);
+  eventSource.addEventListener("open", () => {
+    statusEl.textContent = "在线";
+  });
+  eventSource.addEventListener("session", (event) => {
+    const payload = JSON.parse(event.data);
+    if (payload.session) {
+      statusEl.textContent = "在线";
+      render(payload.session);
+    }
+  });
+  eventSource.addEventListener("error", () => {
+    statusEl.textContent = "正在重连";
+  });
+}
+
+function fallbackRefresh() {
+  if (!window.EventSource || !eventSource || eventSource.readyState !== EventSource.OPEN) {
+    fetchState();
+  }
+}
+
 async function sendMessage(content) {
   if (isSending) {
     return;
@@ -242,4 +275,5 @@ stopButton.addEventListener("click", stopGeneration);
 regenerateButton.addEventListener("click", regenerateReply);
 
 fetchState();
-setInterval(fetchState, 420);
+connectEventStream();
+setInterval(fallbackRefresh, 5000);

@@ -24,6 +24,7 @@ const config = {
 
 const newVisitorTitle = "新访客";
 const sessions = new Map();
+const sseClients = new Set();
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -420,6 +421,7 @@ function getSession(id) {
     persistSession(session);
     persistAllMessages(session);
     recordAuditLog("session_created", { sessionId: id });
+    broadcastSessionUpdate(session);
   }
 
   return sessions.get(id);
@@ -428,6 +430,7 @@ function getSession(id) {
 function touch(session) {
   session.updatedAt = now();
   persistSession(session);
+  broadcastSessionUpdate(session);
 }
 
 function lastAssistantMessage(session) {
@@ -488,6 +491,86 @@ function publicSession(session) {
     canRegenerate: canRegenerate(session),
     revealed: session.revealed
   };
+}
+
+function adminSessionsSnapshot() {
+  return [...sessions.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(summarizeSession);
+}
+
+function adminSessionDetail(session) {
+  return {
+    ...summarizeSession(session),
+    canRegenerate: canRegenerate(session),
+    messages: session.messages.map(serializeMessage),
+    auditLogs: statements.selectAuditLogsBySession.all(session.id, 30).map(serializeAuditLog)
+  };
+}
+
+function writeSse(client, event, payload) {
+  if (client.response.destroyed || client.response.writableEnded) {
+    sseClients.delete(client);
+    return;
+  }
+
+  try {
+    client.response.write(`event: ${event}\n`);
+    client.response.write(`data: ${JSON.stringify(payload)}\n\n`);
+  } catch {
+    sseClients.delete(client);
+  }
+}
+
+function writeSseHeartbeat(client) {
+  if (client.response.destroyed || client.response.writableEnded) {
+    sseClients.delete(client);
+    return;
+  }
+
+  try {
+    client.response.write(": heartbeat\n\n");
+  } catch {
+    sseClients.delete(client);
+  }
+}
+
+function addSseClient(request, reply, client) {
+  reply.hijack();
+  const response = reply.raw;
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no"
+  });
+  response.write(": connected\n\n");
+
+  client.response = response;
+  sseClients.add(client);
+  request.raw.on("close", () => {
+    sseClients.delete(client);
+  });
+  return client;
+}
+
+function broadcastSessionUpdate(session) {
+  if (!sseClients.size) {
+    return;
+  }
+
+  const chatPayload = { session: publicSession(session) };
+  const adminPayload = {
+    changedSessionId: session.id,
+    sessions: adminSessionsSnapshot(),
+    session: adminSessionDetail(session)
+  };
+
+  for (const client of sseClients) {
+    if (client.type === "chat" && client.sessionId === session.id) {
+      writeSse(client, "session", chatPayload);
+    } else if (client.type === "admin") {
+      writeSse(client, "admin", adminPayload);
+    }
+  }
 }
 
 function requestBody(request) {
@@ -807,6 +890,18 @@ async function getChatSession(request, reply) {
   sendJson(reply, 200, publicSession(session));
 }
 
+async function streamChatEvents(request, reply) {
+  const session = sessionFromRequest(request, reply);
+  if (!session) {
+    return;
+  }
+
+  session.lastSeenAt = now();
+  persistSession(session);
+  const client = addSseClient(request, reply, { type: "chat", sessionId: session.id });
+  writeSse(client, "session", { session: publicSession(session) });
+}
+
 async function postChatMessage(request, reply) {
   const session = sessionFromRequest(request, reply);
   if (!session) {
@@ -883,10 +978,16 @@ async function requestRegenerate(request, reply) {
 }
 
 async function getAdminSessions(request, reply) {
-  const sortedSessions = [...sessions.values()]
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-    .map(summarizeSession);
-  sendJson(reply, 200, { sessions: sortedSessions });
+  sendJson(reply, 200, { sessions: adminSessionsSnapshot() });
+}
+
+async function streamAdminEvents(request, reply) {
+  const client = addSseClient(request, reply, { type: "admin", adminId: request.admin.id });
+  writeSse(client, "admin", {
+    changedSessionId: null,
+    sessions: adminSessionsSnapshot(),
+    session: null
+  });
 }
 
 async function getAdminSession(request, reply) {
@@ -895,14 +996,7 @@ async function getAdminSession(request, reply) {
     return;
   }
 
-  sendJson(reply, 200, {
-    session: {
-      ...summarizeSession(session),
-      canRegenerate: canRegenerate(session),
-      messages: session.messages.map(serializeMessage),
-      auditLogs: statements.selectAuditLogsBySession.all(session.id, 30).map(serializeAuditLog)
-    }
-  });
+  sendJson(reply, 200, { session: adminSessionDetail(session) });
 }
 
 async function setAdminTyping(request, reply) {
@@ -986,11 +1080,13 @@ function registerRoutes(app) {
   app.get("/api/admin/me", { preHandler: requireAdmin }, getCurrentAdmin);
 
   app.get("/api/chat/:sessionId", getChatSession);
+  app.get("/api/chat/:sessionId/events", streamChatEvents);
   app.post("/api/chat/:sessionId/messages", postChatMessage);
   app.post("/api/chat/:sessionId/stop", stopChatGeneration);
   app.post("/api/chat/:sessionId/regenerate", requestRegenerate);
 
   app.get("/api/admin/sessions", { preHandler: requireAdmin }, getAdminSessions);
+  app.get("/api/admin/events", { preHandler: requireAdmin }, streamAdminEvents);
   app.get("/api/admin/sessions/:sessionId", { preHandler: requireAdmin }, getAdminSession);
   app.post("/api/admin/sessions/:sessionId/typing", { preHandler: requireAdmin }, setAdminTyping);
   app.post("/api/admin/sessions/:sessionId/reply", { preHandler: requireAdmin }, sendAdminReply);
@@ -1025,12 +1121,25 @@ function clearAllTimers() {
     }
     session.pendingTimers.clear();
   }
+
+  for (const client of sseClients) {
+    if (!client.response.destroyed && !client.response.writableEnded) {
+      client.response.end();
+    }
+  }
+  sseClients.clear();
 }
 
 ensureConfiguredAdmins();
 loadSessionsFromDatabase();
 const cleanupTimer = setInterval(cleanupExpiredSessions, 60 * 60 * 1000);
 cleanupTimer.unref();
+const sseHeartbeatTimer = setInterval(() => {
+  for (const client of sseClients) {
+    writeSseHeartbeat(client);
+  }
+}, 25_000);
+sseHeartbeatTimer.unref();
 
 const app = fastify({
   bodyLimit: 100_000,
@@ -1047,6 +1156,7 @@ app.setNotFoundHandler(handleStaticRequest);
 app.addHook("onClose", async () => {
   clearAllTimers();
   clearInterval(cleanupTimer);
+  clearInterval(sseHeartbeatTimer);
   db.close();
 });
 registerRoutes(app);
