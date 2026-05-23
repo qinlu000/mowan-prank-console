@@ -1,16 +1,17 @@
-const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const { randomUUID, timingSafeEqual } = require("node:crypto");
+const fastify = require("fastify");
 
-const host = process.env.HOST || "127.0.0.1";
-const port = Number(process.env.PORT || 5173);
-const publicDir = path.resolve(__dirname, "public");
+const config = {
+  host: process.env.HOST || "127.0.0.1",
+  port: Number(process.env.PORT || 5173),
+  publicDir: path.resolve(__dirname, "public"),
+  adminCookieName: "mowan_admin",
+  adminPassword: process.env.ADMIN_PASSWORD || randomUUID().slice(0, 12)
+};
+
 const newVisitorTitle = "新访客";
-const adminCookieName = "mowan_admin";
-const generatedAdminPassword = randomUUID().slice(0, 12);
-const adminPassword = process.env.ADMIN_PASSWORD || generatedAdminPassword;
-
 const sessions = new Map();
 const adminTokens = new Set();
 
@@ -146,29 +147,24 @@ function publicSession(session) {
   };
 }
 
-function sendJson(res, status, payload) {
-  const body = JSON.stringify(payload);
-  res.writeHead(status, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Content-Length": Buffer.byteLength(body)
-  });
-  res.end(body);
+function requestBody(request) {
+  return request.body && typeof request.body === "object" ? request.body : {};
 }
 
-function sendError(res, status, message) {
-  sendJson(res, status, { error: message });
+function sendJson(reply, status, payload) {
+  reply.code(status).type("application/json; charset=utf-8").send(payload);
 }
 
-function redirect(res, location) {
-  res.writeHead(302, {
-    Location: location,
-    "Cache-Control": "no-store"
-  });
-  res.end();
+function sendError(reply, status, message) {
+  sendJson(reply, status, { error: message });
 }
 
-function parseCookies(req) {
-  const header = req.headers.cookie || "";
+function redirect(reply, location) {
+  reply.code(302).header("Location", location).header("Cache-Control", "no-store").send();
+}
+
+function parseCookies(request) {
+  const header = request.headers.cookie || "";
   const cookies = new Map();
   for (const part of header.split(";")) {
     const [rawName, ...rawValue] = part.trim().split("=");
@@ -189,134 +185,63 @@ function safeEqual(left, right) {
   return timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-function isAdminAuthenticated(req) {
-  const token = parseCookies(req).get(adminCookieName);
+function isAdminAuthenticated(request) {
+  const token = parseCookies(request).get(config.adminCookieName);
   return Boolean(token && adminTokens.has(token));
 }
 
-function setAdminCookie(res, token) {
-  res.setHeader(
+async function requireAdmin(request, reply) {
+  if (!isAdminAuthenticated(request)) {
+    sendError(reply, 401, "需要后台登录");
+    return reply;
+  }
+  return undefined;
+}
+
+function setAdminCookie(reply, token) {
+  reply.header(
     "Set-Cookie",
-    `${adminCookieName}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`
+    `${config.adminCookieName}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`
   );
 }
 
-function clearAdminCookie(res) {
-  res.setHeader(
+function clearAdminCookie(reply) {
+  reply.header(
     "Set-Cookie",
-    `${adminCookieName}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`
+    `${config.adminCookieName}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`
   );
 }
 
-function readJson(req) {
-  return new Promise((resolve, reject) => {
-    let body = "";
-    req.setEncoding("utf8");
-    req.on("data", (chunk) => {
-      body += chunk;
-      if (body.length > 100_000) {
-        reject(new Error("请求内容太大"));
-        req.destroy();
-      }
-    });
-    req.on("end", () => {
-      if (!body) {
-        resolve({});
-        return;
-      }
-
-      try {
-        resolve(JSON.parse(body));
-      } catch {
-        reject(new Error("JSON 格式无效"));
-      }
-    });
-    req.on("error", reject);
-  });
-}
-
-function sendStatic(urlPath, res) {
+async function sendStatic(urlPath, reply) {
   const safePath = urlPath === "/" ? "/index.html" : urlPath;
   let decodedPath;
 
   try {
     decodedPath = decodeURIComponent(safePath);
   } catch {
-    sendError(res, 400, "路径无效");
+    sendError(reply, 400, "路径无效");
     return;
   }
 
-  const filePath = path.resolve(publicDir, `.${decodedPath}`);
-  if (!filePath.startsWith(publicDir)) {
-    sendError(res, 403, "禁止访问");
+  const filePath = path.resolve(config.publicDir, `.${decodedPath}`);
+  const insidePublicDir =
+    filePath === config.publicDir || filePath.startsWith(`${config.publicDir}${path.sep}`);
+  if (!insidePublicDir) {
+    sendError(reply, 403, "禁止访问");
     return;
   }
 
-  fs.readFile(filePath, (error, data) => {
-    if (error) {
-      sendError(res, error.code === "ENOENT" ? 404 : 500, "文件不存在");
-      return;
-    }
-
+  try {
+    const data = await fs.promises.readFile(filePath);
     const ext = path.extname(filePath).toLowerCase();
-    res.writeHead(200, {
-      "Content-Type": mimeTypes.get(ext) || "application/octet-stream",
-      "Cache-Control": "no-store"
-    });
-    res.end(data);
-  });
-}
-
-function parseChatPath(pathname) {
-  const match = pathname.match(/^\/api\/chat\/([^/]+)(?:\/(messages|stop|regenerate))?$/);
-  if (!match) {
-    return null;
+    reply
+      .code(200)
+      .type(mimeTypes.get(ext) || "application/octet-stream")
+      .header("Cache-Control", "no-store")
+      .send(data);
+  } catch (error) {
+    sendError(reply, error.code === "ENOENT" ? 404 : 500, "文件不存在");
   }
-
-  return {
-    sessionId: match[1],
-    action: match[2] || null
-  };
-}
-
-function parseAdminPath(pathname) {
-  const match = pathname.match(/^\/api\/admin\/sessions(?:\/([^/]+)(?:\/(reply|typing|reveal))?)?$/);
-  if (!match) {
-    return null;
-  }
-
-  return {
-    sessionId: match[1] || null,
-    action: match[2] || null
-  };
-}
-
-async function handleAdminLogin(req, res) {
-  if (req.method !== "POST") {
-    sendError(res, 405, "方法不允许");
-    return;
-  }
-
-  const body = await readJson(req);
-  const password = String(body.password || "");
-  if (!safeEqual(password, adminPassword)) {
-    sendError(res, 401, "后台密码不正确");
-    return;
-  }
-
-  const token = randomUUID();
-  adminTokens.add(token);
-  setAdminCookie(res, token);
-  sendJson(res, 200, { ok: true });
-}
-
-function handleAdminLogout(req, res) {
-  const token = parseCookies(req).get(adminCookieName);
-  if (token) {
-    adminTokens.delete(token);
-  }
-  clearAdminCookie(res);
-  sendJson(res, 200, { ok: true });
 }
 
 function clearGenerationTimer(session) {
@@ -469,237 +394,284 @@ function clearManualTyping(session) {
   }
 }
 
-async function handleChatApi(req, res, pathname) {
-  const chatPath = parseChatPath(pathname);
-  if (!chatPath) {
-    sendError(res, 404, "接口不存在");
+function sessionFromRequest(request, reply) {
+  const session = getSession(request.params.sessionId);
+  if (!session) {
+    sendError(reply, 400, "会话 ID 无效");
+    return null;
+  }
+  return session;
+}
+
+async function handleAdminLogin(request, reply) {
+  const body = requestBody(request);
+  const password = String(body.password || "");
+  if (!safeEqual(password, config.adminPassword)) {
+    sendError(reply, 401, "后台密码不正确");
     return;
   }
 
-  const session = getSession(chatPath.sessionId);
+  const token = randomUUID();
+  adminTokens.add(token);
+  setAdminCookie(reply, token);
+  sendJson(reply, 200, { ok: true });
+}
+
+async function handleAdminLogout(request, reply) {
+  const token = parseCookies(request).get(config.adminCookieName);
+  if (token) {
+    adminTokens.delete(token);
+  }
+  clearAdminCookie(reply);
+  sendJson(reply, 200, { ok: true });
+}
+
+async function getChatSession(request, reply) {
+  const session = sessionFromRequest(request, reply);
   if (!session) {
-    sendError(res, 400, "会话 ID 无效");
     return;
   }
 
   session.lastSeenAt = now();
-
-  if (req.method === "GET" && !chatPath.action) {
-    sendJson(res, 200, publicSession(session));
-    return;
-  }
-
-  if (req.method === "POST" && chatPath.action === "messages") {
-    const body = await readJson(req);
-    const content = String(body.content || "").trim();
-    if (!content) {
-      sendError(res, 400, "消息不能为空");
-      return;
-    }
-
-    if (content.length > 2000) {
-      sendError(res, 400, "消息太长了");
-      return;
-    }
-
-    stopActiveGeneration(session, "stopped");
-    session.messages.push(createMessage("user", content));
-    if (session.title === newVisitorTitle) {
-      session.title = content.length > 28 ? `${content.slice(0, 28)}...` : content;
-    }
-    session.regenerateRequest = null;
-    session.adminTyping = true;
-    touch(session);
-    sendJson(res, 201, publicSession(session));
-    return;
-  }
-
-  if (req.method === "POST" && chatPath.action === "stop") {
-    const stopped = stopActiveGeneration(session, "stopped");
-    sendJson(res, 200, { ok: true, stopped, session: publicSession(session) });
-    return;
-  }
-
-  if (req.method === "POST" && chatPath.action === "regenerate") {
-    const lastAssistant = lastAssistantMessage(session);
-    if (!lastAssistant) {
-      sendError(res, 400, "还没有可重新生成的回复");
-      return;
-    }
-
-    stopActiveGeneration(session, "stopped");
-    session.regenerateRequest = {
-      id: randomUUID(),
-      createdAt: now(),
-      previousMessageId: lastAssistant.id
-    };
-    session.adminTyping = true;
-    touch(session);
-    sendJson(res, 200, { ok: true, session: publicSession(session) });
-    return;
-  }
-
-  sendError(res, 405, "方法不允许");
+  sendJson(reply, 200, publicSession(session));
 }
 
-async function handleAdminApi(req, res, pathname) {
-  const adminPath = parseAdminPath(pathname);
-  if (!adminPath) {
-    sendError(res, 404, "接口不存在");
-    return;
-  }
-
-  if (req.method === "GET" && !adminPath.sessionId) {
-    const sortedSessions = [...sessions.values()]
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-      .map(summarizeSession);
-    sendJson(res, 200, { sessions: sortedSessions });
-    return;
-  }
-
-  if (!adminPath.sessionId) {
-    sendError(res, 405, "方法不允许");
-    return;
-  }
-
-  const session = getSession(adminPath.sessionId);
+async function postChatMessage(request, reply) {
+  const session = sessionFromRequest(request, reply);
   if (!session) {
-    sendError(res, 400, "会话 ID 无效");
     return;
   }
 
-  if (req.method === "GET" && !adminPath.action) {
-    sendJson(res, 200, {
-      session: {
-        ...summarizeSession(session),
-        canRegenerate: canRegenerate(session),
-        messages: session.messages.map(serializeMessage)
-      }
-    });
+  session.lastSeenAt = now();
+  const body = requestBody(request);
+  const content = String(body.content || "").trim();
+  if (!content) {
+    sendError(reply, 400, "消息不能为空");
     return;
   }
 
-  if (req.method !== "POST") {
-    sendError(res, 405, "方法不允许");
+  if (content.length > 2000) {
+    sendError(reply, 400, "消息太长了");
     return;
   }
 
-  const body = await readJson(req);
-
-  if (adminPath.action === "typing") {
-    if (session.generation) {
-      sendJson(res, 200, { ok: true, typing: false });
-      return;
-    }
-
-    session.adminTyping = Boolean(body.typing);
-    touch(session);
-    sendJson(res, 200, { ok: true, typing: session.adminTyping });
-    return;
+  stopActiveGeneration(session, "stopped");
+  session.messages.push(createMessage("user", content));
+  if (session.title === newVisitorTitle) {
+    session.title = content.length > 28 ? `${content.slice(0, 28)}...` : content;
   }
-
-  if (adminPath.action === "reply") {
-    const content = String(body.content || "").trim();
-    if (!content) {
-      sendError(res, 400, "回复不能为空");
-      return;
-    }
-
-    if (content.length > 4000) {
-      sendError(res, 400, "回复太长了");
-      return;
-    }
-
-    const delayMs = Math.max(0, Math.min(Number(body.delayMs || 0), 8000));
-    queueReply(session, content, delayMs);
-    sendJson(res, delayMs > 0 ? 202 : 201, {
-      ok: true,
-      queued: delayMs > 0,
-      streaming: delayMs <= 0,
-      delayMs,
-      session: summarizeSession(session)
-    });
-    return;
-  }
-
-  if (adminPath.action === "reveal") {
-    stopActiveGeneration(session, "stopped");
-    session.messages.push(
-      createMessage(
-        "assistant",
-        "摊牌了：这个聊天窗口背后不是大模型，是有人在后台手动回复你。你刚刚参与了一个 LLM 网站整蛊实验。"
-      )
-    );
-    session.revealed = true;
-    clearManualTyping(session);
-    touch(session);
-    sendJson(res, 201, { ok: true, revealed: true });
-    return;
-  }
-
-  sendError(res, 404, "接口不存在");
+  session.regenerateRequest = null;
+  session.adminTyping = true;
+  touch(session);
+  sendJson(reply, 201, publicSession(session));
 }
 
-async function handleRequest(req, res) {
-  const url = new URL(req.url, `http://${req.headers.host || `${host}:${port}`}`);
-
-  try {
-    if (url.pathname === "/admin.html" && !isAdminAuthenticated(req)) {
-      redirect(res, "/admin-login.html");
-      return;
-    }
-
-    if (url.pathname === "/admin-login.html" && isAdminAuthenticated(req)) {
-      redirect(res, "/admin.html");
-      return;
-    }
-
-    if (url.pathname.startsWith("/api/chat/")) {
-      await handleChatApi(req, res, url.pathname);
-      return;
-    }
-
-    if (url.pathname === "/api/admin/login") {
-      await handleAdminLogin(req, res);
-      return;
-    }
-
-    if (url.pathname === "/api/admin/logout") {
-      handleAdminLogout(req, res);
-      return;
-    }
-
-    if (url.pathname.startsWith("/api/admin/")) {
-      if (!isAdminAuthenticated(req)) {
-        sendError(res, 401, "需要后台登录");
-        return;
-      }
-      await handleAdminApi(req, res, url.pathname);
-      return;
-    }
-
-    sendStatic(url.pathname, res);
-  } catch (error) {
-    sendError(res, 500, error.message || "服务器错误");
+async function stopChatGeneration(request, reply) {
+  const session = sessionFromRequest(request, reply);
+  if (!session) {
+    return;
   }
+
+  session.lastSeenAt = now();
+  const stopped = stopActiveGeneration(session, "stopped");
+  sendJson(reply, 200, { ok: true, stopped, session: publicSession(session) });
 }
 
-const server = http.createServer(handleRequest);
-
-server.listen(port, host, () => {
-  console.log(`魔丸 prank server is running at http://${host}:${port}`);
-  console.log(`Visitor page: http://${host}:${port}/`);
-  console.log(`Admin console: http://${host}:${port}/admin.html`);
-  if (!process.env.ADMIN_PASSWORD) {
-    console.log(`Generated admin password: ${adminPassword}`);
+async function requestRegenerate(request, reply) {
+  const session = sessionFromRequest(request, reply);
+  if (!session) {
+    return;
   }
-});
 
-process.on("SIGINT", () => {
+  session.lastSeenAt = now();
+  const lastAssistant = lastAssistantMessage(session);
+  if (!lastAssistant) {
+    sendError(reply, 400, "还没有可重新生成的回复");
+    return;
+  }
+
+  stopActiveGeneration(session, "stopped");
+  session.regenerateRequest = {
+    id: randomUUID(),
+    createdAt: now(),
+    previousMessageId: lastAssistant.id
+  };
+  session.adminTyping = true;
+  touch(session);
+  sendJson(reply, 200, { ok: true, session: publicSession(session) });
+}
+
+async function getAdminSessions(request, reply) {
+  const sortedSessions = [...sessions.values()]
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .map(summarizeSession);
+  sendJson(reply, 200, { sessions: sortedSessions });
+}
+
+async function getAdminSession(request, reply) {
+  const session = sessionFromRequest(request, reply);
+  if (!session) {
+    return;
+  }
+
+  sendJson(reply, 200, {
+    session: {
+      ...summarizeSession(session),
+      canRegenerate: canRegenerate(session),
+      messages: session.messages.map(serializeMessage)
+    }
+  });
+}
+
+async function setAdminTyping(request, reply) {
+  const session = sessionFromRequest(request, reply);
+  if (!session) {
+    return;
+  }
+
+  if (session.generation) {
+    sendJson(reply, 200, { ok: true, typing: false });
+    return;
+  }
+
+  const body = requestBody(request);
+  session.adminTyping = Boolean(body.typing);
+  touch(session);
+  sendJson(reply, 200, { ok: true, typing: session.adminTyping });
+}
+
+async function sendAdminReply(request, reply) {
+  const session = sessionFromRequest(request, reply);
+  if (!session) {
+    return;
+  }
+
+  const body = requestBody(request);
+  const content = String(body.content || "").trim();
+  if (!content) {
+    sendError(reply, 400, "回复不能为空");
+    return;
+  }
+
+  if (content.length > 4000) {
+    sendError(reply, 400, "回复太长了");
+    return;
+  }
+
+  const delayMs = Math.max(0, Math.min(Number(body.delayMs || 0), 8000));
+  queueReply(session, content, delayMs);
+  sendJson(reply, delayMs > 0 ? 202 : 201, {
+    ok: true,
+    queued: delayMs > 0,
+    streaming: delayMs <= 0,
+    delayMs,
+    session: summarizeSession(session)
+  });
+}
+
+async function revealPrank(request, reply) {
+  const session = sessionFromRequest(request, reply);
+  if (!session) {
+    return;
+  }
+
+  stopActiveGeneration(session, "stopped");
+  session.messages.push(
+    createMessage(
+      "assistant",
+      "摊牌了：这个聊天窗口背后不是大模型，是有人在后台手动回复你。你刚刚参与了一个 LLM 网站整蛊实验。"
+    )
+  );
+  session.revealed = true;
+  clearManualTyping(session);
+  touch(session);
+  sendJson(reply, 201, { ok: true, revealed: true });
+}
+
+function registerRoutes(app) {
+  app.get("/healthz", async (request, reply) => {
+    sendJson(reply, 200, { ok: true });
+  });
+
+  app.post("/api/admin/login", handleAdminLogin);
+  app.all("/api/admin/logout", handleAdminLogout);
+
+  app.get("/api/chat/:sessionId", getChatSession);
+  app.post("/api/chat/:sessionId/messages", postChatMessage);
+  app.post("/api/chat/:sessionId/stop", stopChatGeneration);
+  app.post("/api/chat/:sessionId/regenerate", requestRegenerate);
+
+  app.get("/api/admin/sessions", { preHandler: requireAdmin }, getAdminSessions);
+  app.get("/api/admin/sessions/:sessionId", { preHandler: requireAdmin }, getAdminSession);
+  app.post("/api/admin/sessions/:sessionId/typing", { preHandler: requireAdmin }, setAdminTyping);
+  app.post("/api/admin/sessions/:sessionId/reply", { preHandler: requireAdmin }, sendAdminReply);
+  app.post("/api/admin/sessions/:sessionId/reveal", { preHandler: requireAdmin }, revealPrank);
+}
+
+async function handleStaticRequest(request, reply) {
+  const url = new URL(request.url, `http://${request.headers.host || `${config.host}:${config.port}`}`);
+
+  if (url.pathname.startsWith("/api/")) {
+    sendError(reply, 404, "接口不存在");
+    return;
+  }
+
+  if (url.pathname === "/admin.html" && !isAdminAuthenticated(request)) {
+    redirect(reply, "/admin-login.html");
+    return;
+  }
+
+  if (url.pathname === "/admin-login.html" && isAdminAuthenticated(request)) {
+    redirect(reply, "/admin.html");
+    return;
+  }
+
+  await sendStatic(url.pathname, reply);
+}
+
+function clearAllTimers() {
   for (const session of sessions.values()) {
     for (const timer of session.pendingTimers) {
       clearTimeout(timer);
     }
+    session.pendingTimers.clear();
   }
-  server.close(() => process.exit(0));
+}
+
+const app = fastify({
+  bodyLimit: 100_000,
+  logger: false
 });
+
+app.setErrorHandler((error, request, reply) => {
+  const status = error.statusCode || 500;
+  const message = status === 413 ? "请求内容太大" : error.message || "服务器错误";
+  sendError(reply, status >= 400 ? status : 500, message);
+});
+
+app.setNotFoundHandler(handleStaticRequest);
+app.addHook("onClose", clearAllTimers);
+registerRoutes(app);
+
+async function start() {
+  try {
+    await app.listen({ host: config.host, port: config.port });
+    console.log(`魔丸 prank server is running at http://${config.host}:${config.port}`);
+    console.log(`Visitor page: http://${config.host}:${config.port}/`);
+    console.log(`Admin console: http://${config.host}:${config.port}/admin.html`);
+    if (!process.env.ADMIN_PASSWORD) {
+      console.log(`Generated admin password: ${config.adminPassword}`);
+    }
+  } catch (error) {
+    app.log.error(error);
+    console.error(error);
+    process.exit(1);
+  }
+}
+
+process.on("SIGINT", async () => {
+  await app.close();
+  process.exit(0);
+});
+
+start();

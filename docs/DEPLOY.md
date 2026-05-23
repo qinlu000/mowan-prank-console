@@ -13,6 +13,7 @@ pnpm install
 
 - 访客页：http://127.0.0.1:5173/
 - 后台页：http://127.0.0.1:5173/admin.html
+- 健康检查：http://127.0.0.1:5173/healthz
 
 ## cpolar 内网穿透
 
