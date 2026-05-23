@@ -89,7 +89,15 @@ pnpm run dev
 docker compose up -d --build
 ```
 
-Caddy 会自动申请 HTTPS 证书。SQLite 数据保存在 Docker volume 中，可以用 `scripts/backup-sqlite.ps1` 和 `scripts/restore-sqlite.ps1` 备份恢复。
+Caddy 会自动申请 HTTPS 证书。SQLite 数据保存在 Docker volume 中，可以用 `scripts/backup-sqlite.sh` / `scripts/restore-sqlite.sh`，或 PowerShell 版本的 `.ps1` 脚本备份恢复。
+
+部署后可以在 VPS 上运行：
+
+```bash
+sh scripts/verify-deploy.sh
+```
+
+它会验证健康检查、访客到后台回复、容器重启持久化，以及 SQLite 备份恢复。
 
 ## 内网穿透
 

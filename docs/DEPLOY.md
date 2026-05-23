@@ -39,6 +39,31 @@ docker compose ps
 
 Caddy 会自动申请 HTTPS 证书。后台地址是在同一个域名后加 `/admin.html`。
 
+## 部署验收
+
+在 VPS 上可以直接跑完整验收：
+
+```bash
+sh scripts/verify-deploy.sh
+```
+
+脚本会自动执行：
+
+- `docker compose up -d --build`
+- 等待 `/healthz`
+- 访客发消息
+- 管理员登录并回复
+- 重启 app 容器后确认会话和回复还在
+- 创建 SQLite 备份
+- 写入一条备份后的临时会话
+- 恢复备份并确认临时会话消失、原会话仍在
+
+如果域名还没解析好，可以显式指定访问地址：
+
+```bash
+VERIFY_BASE_URL=http://127.0.0.1 sh scripts/verify-deploy.sh
+```
+
 ## 数据保留
 
 默认配置：
@@ -71,11 +96,23 @@ $env:ADMIN_USERS="admin:换成你的后台密码,friend:换成朋友的后台密
 
 Docker 部署后可以从项目目录执行：
 
+```bash
+sh scripts/backup-sqlite.sh
+```
+
+Windows PowerShell 也可以用：
+
 ```powershell
 .\scripts\backup-sqlite.ps1
 ```
 
 备份文件会保存到 `backups/`。恢复时传入备份文件路径：
+
+```bash
+sh scripts/restore-sqlite.sh ./backups/mowan-20260524-120000.sqlite
+```
+
+Windows PowerShell：
 
 ```powershell
 .\scripts\restore-sqlite.ps1 -BackupPath .\backups\mowan-20260524-120000.sqlite

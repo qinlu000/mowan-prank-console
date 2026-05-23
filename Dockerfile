@@ -22,6 +22,7 @@ RUN corepack enable && corepack prepare pnpm@11.2.2 --activate
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json pnpm-lock.yaml server.js ./
 COPY public ./public
+COPY scripts/sqlite-backup.js ./scripts/sqlite-backup.js
 
 EXPOSE 5173
 

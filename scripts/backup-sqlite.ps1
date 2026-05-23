@@ -8,17 +8,21 @@ $ErrorActionPreference = "Stop"
 
 New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$target = Join-Path $BackupDir "mowan-$timestamp.sqlite"
+$fileName = "mowan-$timestamp.sqlite"
+$target = Join-Path $BackupDir $fileName
+$containerTarget = "/data/backups/$fileName"
 
-docker compose cp "${Service}:${DatabasePath}" $target
+docker compose exec -T $Service node scripts/sqlite-backup.js $DatabasePath $containerTarget
 if ($LASTEXITCODE -ne 0) {
-  throw "Failed to copy ${Service}:${DatabasePath}"
+  throw "Failed to create SQLite backup inside $Service"
 }
 
-foreach ($suffix in @("-wal", "-shm")) {
-  $sidecarTarget = "$target$suffix"
-  docker compose cp "${Service}:${DatabasePath}${suffix}" $sidecarTarget 2>$null
-  $global:LASTEXITCODE = 0
+docker compose cp "${Service}:${containerTarget}" $target
+if ($LASTEXITCODE -ne 0) {
+  throw "Failed to copy ${Service}:${containerTarget}"
 }
+
+docker compose exec -T $Service rm -f $containerTarget 2>$null
+$global:LASTEXITCODE = 0
 
 Write-Host "SQLite backup saved to $target"
