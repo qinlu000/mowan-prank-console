@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.2.2 --activate
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check JavaScript
+        run: pnpm run check
+
+      - name: Build Docker image
+        run: docker build -t mowan-prank-console:ci .
+
+      - name: Start Docker image
+        run: |
+          docker run -d \
+            --name mowan-ci \
+            -p 5173:5173 \
+            -e ADMIN_USERS=admin:admin-pass \
+            -e DATABASE_URL=file:/data/mowan.sqlite \
+            mowan-prank-console:ci
+
+      - name: Wait for health check
+        run: |
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:5173/healthz | grep -q '"ok":true'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs mowan-ci
+          exit 1
