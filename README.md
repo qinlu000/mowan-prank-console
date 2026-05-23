@@ -16,15 +16,26 @@
 - “摊牌”按钮
 - cpolar 内网穿透辅助脚本
 
-## 要求
+## 开发环境
 
-- Node.js 20 或更高版本
+- Node.js 22 或更高版本
+- pnpm 11.2.2
+- 推荐使用 Volta 固定 Node 和 pnpm 版本
 - Windows PowerShell，用于本仓库自带脚本
 
 ## 快速开始
 
+首次使用先安装 Volta，然后安装本项目固定的 Node 和 pnpm 版本：
+
 ```powershell
-npm install
+winget install --id Volta.Volta -e
+volta install node@22.19.0 pnpm@11.2.2
+```
+
+然后安装依赖并启动：
+
+```powershell
+pnpm install
 .\scripts\start-local.ps1 -AdminPassword "换成你的后台密码"
 ```
 
@@ -37,10 +48,18 @@ npm install
 
 ```powershell
 $env:ADMIN_PASSWORD="换成你的后台密码"
-npm start
+pnpm start
 ```
 
 如果不设置 `ADMIN_PASSWORD`，服务启动时会在终端生成一个临时后台密码。
+
+## 常用命令
+
+```powershell
+pnpm run doctor
+pnpm run check
+pnpm run dev
+```
 
 ## 内网穿透
 

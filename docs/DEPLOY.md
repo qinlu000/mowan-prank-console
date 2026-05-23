@@ -5,6 +5,7 @@
 ## 本地运行
 
 ```powershell
+pnpm install
 .\scripts\start-local.ps1 -AdminPassword "换成你的后台密码"
 ```
 

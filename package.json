@@ -3,12 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "description": "A local fake LLM chat site branded as 魔丸 with a human-operated admin console.",
+  "packageManager": "pnpm@11.2.2",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "check": "node --check server.js && node --check public/app.js && node --check public/admin.js && node --check public/admin-login.js"
+    "check": "node --check server.js && node --check public/app.js && node --check public/admin.js && node --check public/admin-login.js",
+    "doctor": "node scripts/doctor.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
+  },
+  "volta": {
+    "node": "22.19.0",
+    "pnpm": "11.2.2"
   }
 }
