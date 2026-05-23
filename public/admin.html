@@ -21,6 +21,10 @@
           </div>
           <a class="ghost-button" href="/" target="_blank" rel="noreferrer">访客页</a>
         </header>
+        <div class="operator-badge">
+          <span>当前管理员</span>
+          <strong id="operatorName">未登录</strong>
+        </div>
         <div class="session-toolbar">
           <div>
             <div class="panel-title">会话</div>
@@ -41,6 +45,7 @@
         </header>
 
         <section class="admin-messages" id="adminMessages" aria-live="polite"></section>
+        <section class="audit-panel" id="auditPanel" aria-label="操作日志"></section>
 
         <section class="quick-replies" aria-label="快捷回复">
           <button type="button" data-reply="短答案：">短答案</button>

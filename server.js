@@ -1,22 +1,29 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { randomUUID, timingSafeEqual } = require("node:crypto");
+const { randomUUID, scryptSync, timingSafeEqual } = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
 const fastify = require("fastify");
+
+const generatedAdminPassword = randomUUID().slice(0, 12);
+const configuredAdminPassword =
+  process.env.ADMIN_PASSWORD || process.env.FIRST_ADMIN_PASSWORD || generatedAdminPassword;
 
 const config = {
   host: process.env.HOST || "127.0.0.1",
   port: Number(process.env.PORT || 5173),
   publicDir: path.resolve(__dirname, "public"),
   adminCookieName: "mowan_admin",
-  adminPassword: process.env.ADMIN_PASSWORD || randomUUID().slice(0, 12),
+  adminUsername: process.env.ADMIN_USERNAME || process.env.FIRST_ADMIN_USERNAME || "admin",
+  adminPassword: configuredAdminPassword,
+  adminUsers: process.env.ADMIN_USERS || "",
+  generatedAdminPassword:
+    !process.env.ADMIN_PASSWORD && !process.env.FIRST_ADMIN_PASSWORD && !process.env.ADMIN_USERS,
   databaseUrl: process.env.DATABASE_URL || "file:data/mowan.sqlite",
   sessionRetentionDays: Number(process.env.SESSION_RETENTION_DAYS || 7)
 };
 
 const newVisitorTitle = "新访客";
 const sessions = new Map();
-const adminTokens = new Set();
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -52,6 +59,39 @@ function parseJson(value, fallback = null) {
   }
 }
 
+function parseConfiguredAdmins() {
+  const entries = config.adminUsers
+    ? config.adminUsers.split(/[,\n;]/)
+    : [`${config.adminUsername}:${config.adminPassword}`];
+
+  return entries
+    .map((entry) => {
+      const separator = entry.includes(":") ? ":" : "=";
+      const [rawUsername, ...rawPassword] = entry.split(separator);
+      return {
+        username: String(rawUsername || "").trim(),
+        password: rawPassword.join(separator)
+      };
+    })
+    .filter((admin) => admin.username && admin.password);
+}
+
+function hashPassword(password, salt = randomUUID()) {
+  const hash = scryptSync(String(password), salt, 32).toString("hex");
+  return `scrypt:${salt}:${hash}`;
+}
+
+function verifyPassword(password, storedHash) {
+  const [scheme, salt, expectedHash] = String(storedHash || "").split(":");
+  if (scheme !== "scrypt" || !salt || !expectedHash) {
+    return false;
+  }
+
+  const actual = scryptSync(String(password), salt, 32);
+  const expected = Buffer.from(expectedHash, "hex");
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
 function createDatabase() {
   const databasePath = resolveDatabasePath(config.databaseUrl);
   if (databasePath !== ":memory:") {
@@ -62,6 +102,23 @@ function createDatabase() {
   database.exec(`
     PRAGMA foreign_keys = ON;
     PRAGMA journal_mode = WAL;
+
+    CREATE TABLE IF NOT EXISTS admins (
+      id TEXT PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS admin_sessions (
+      token TEXT PRIMARY KEY,
+      admin_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      FOREIGN KEY (admin_id) REFERENCES admins(id) ON DELETE CASCADE
+    );
 
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
@@ -111,6 +168,27 @@ function createDatabase() {
 
 const db = createDatabase();
 const statements = {
+  selectAdminByUsername: db.prepare("SELECT * FROM admins WHERE username = ?"),
+  selectAdminByToken: db.prepare(`
+    SELECT admins.id, admins.username, admin_sessions.token, admin_sessions.expires_at
+    FROM admin_sessions
+    JOIN admins ON admins.id = admin_sessions.admin_id
+    WHERE admin_sessions.token = ? AND admin_sessions.expires_at > ?
+  `),
+  insertAdmin: db.prepare(`
+    INSERT INTO admins (id, username, password_hash, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+  `),
+  updateAdminPassword: db.prepare(`
+    UPDATE admins SET password_hash = ?, updated_at = ? WHERE username = ?
+  `),
+  insertAdminSession: db.prepare(`
+    INSERT INTO admin_sessions (token, admin_id, created_at, last_seen_at, expires_at)
+    VALUES (?, ?, ?, ?, ?)
+  `),
+  touchAdminSession: db.prepare("UPDATE admin_sessions SET last_seen_at = ? WHERE token = ?"),
+  deleteAdminSession: db.prepare("DELETE FROM admin_sessions WHERE token = ?"),
+  deleteExpiredAdminSessions: db.prepare("DELETE FROM admin_sessions WHERE expires_at <= ?"),
   upsertSession: db.prepare(`
     INSERT INTO sessions (
       id, title, created_at, updated_at, last_seen_at, admin_typing, revealed, regenerate_request
@@ -136,6 +214,12 @@ const statements = {
   selectSessions: db.prepare("SELECT * FROM sessions ORDER BY updated_at DESC"),
   selectMessages: db.prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY position ASC"),
   deleteExpiredSessions: db.prepare("DELETE FROM sessions WHERE updated_at < ?"),
+  selectLatestAuditLogBySession: db.prepare(`
+    SELECT * FROM audit_logs WHERE session_id = ? ORDER BY created_at DESC LIMIT 1
+  `),
+  selectAuditLogsBySession: db.prepare(`
+    SELECT * FROM audit_logs WHERE session_id = ? ORDER BY created_at DESC LIMIT ?
+  `),
   insertAuditLog: db.prepare(`
     INSERT INTO audit_logs (id, session_id, actor, action, detail, created_at)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -163,6 +247,52 @@ function serializeMessage(message) {
     updatedAt: message.updatedAt || message.createdAt,
     status: message.status || "complete"
   };
+}
+
+function serializeAdmin(admin) {
+  if (!admin) {
+    return null;
+  }
+
+  return {
+    id: admin.id,
+    username: admin.username
+  };
+}
+
+function serializeAuditLog(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    actor: row.actor,
+    action: row.action,
+    detail: parseJson(row.detail, null),
+    createdAt: row.created_at
+  };
+}
+
+function ensureConfiguredAdmins() {
+  const configuredAdmins = parseConfiguredAdmins();
+  if (!configuredAdmins.length) {
+    throw new Error("No admin accounts configured. Set ADMIN_PASSWORD or ADMIN_USERS.");
+  }
+
+  const timestamp = now();
+
+  for (const admin of configuredAdmins) {
+    const existing = statements.selectAdminByUsername.get(admin.username);
+    const passwordHash = hashPassword(admin.password);
+    if (existing) {
+      statements.updateAdminPassword.run(passwordHash, timestamp, admin.username);
+      continue;
+    }
+
+    statements.insertAdmin.run(randomUUID(), admin.username, passwordHash, timestamp, timestamp);
+  }
 }
 
 function persistSession(session) {
@@ -233,6 +363,8 @@ function hydrateSession(row) {
 }
 
 function cleanupExpiredSessions() {
+  statements.deleteExpiredAdminSessions.run(now());
+
   const retentionDays = Number.isFinite(config.sessionRetentionDays)
     ? Math.max(0, config.sessionRetentionDays)
     : 7;
@@ -316,6 +448,7 @@ function canRegenerate(session) {
 function summarizeSession(session) {
   const last = session.messages[session.messages.length - 1];
   const userMessages = session.messages.filter((message) => message.role === "user");
+  const latestAuditLog = serializeAuditLog(statements.selectLatestAuditLogBySession.get(session.id));
   return {
     id: session.id,
     title: session.title,
@@ -329,6 +462,7 @@ function summarizeSession(session) {
     revealed: session.revealed,
     messageCount: session.messages.length,
     userMessageCount: userMessages.length,
+    lastAuditLog: latestAuditLog,
     lastMessage: last
       ? {
           role: last.role,
@@ -385,25 +519,37 @@ function parseCookies(request) {
   return cookies;
 }
 
-function safeEqual(left, right) {
-  const leftBuffer = Buffer.from(String(left));
-  const rightBuffer = Buffer.from(String(right));
-  if (leftBuffer.length !== rightBuffer.length) {
-    return false;
+function getAuthenticatedAdmin(request) {
+  const token = parseCookies(request).get(config.adminCookieName);
+  if (!token) {
+    return null;
   }
-  return timingSafeEqual(leftBuffer, rightBuffer);
+
+  const admin = statements.selectAdminByToken.get(token, now());
+  if (!admin) {
+    return null;
+  }
+
+  statements.touchAdminSession.run(now(), token);
+  return {
+    id: admin.id,
+    username: admin.username,
+    token: admin.token
+  };
 }
 
 function isAdminAuthenticated(request) {
-  const token = parseCookies(request).get(config.adminCookieName);
-  return Boolean(token && adminTokens.has(token));
+  return Boolean(getAuthenticatedAdmin(request));
 }
 
 async function requireAdmin(request, reply) {
-  if (!isAdminAuthenticated(request)) {
+  const admin = getAuthenticatedAdmin(request);
+  if (!admin) {
     sendError(reply, 401, "需要后台登录");
     return reply;
   }
+
+  request.admin = admin;
   return undefined;
 }
 
@@ -618,27 +764,36 @@ function sessionFromRequest(request, reply) {
 
 async function handleAdminLogin(request, reply) {
   const body = requestBody(request);
+  const username = String(body.username || config.adminUsername).trim();
   const password = String(body.password || "");
-  if (!safeEqual(password, config.adminPassword)) {
-    sendError(reply, 401, "后台密码不正确");
+  const admin = statements.selectAdminByUsername.get(username);
+  if (!admin || !verifyPassword(password, admin.password_hash)) {
+    sendError(reply, 401, "管理员账号或密码不正确");
     return;
   }
 
   const token = randomUUID();
-  adminTokens.add(token);
-  recordAuditLog("admin_login", { actor: "admin" });
+  const timestamp = now();
+  const expiresAt = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
+  statements.insertAdminSession.run(token, admin.id, timestamp, timestamp, expiresAt);
+  recordAuditLog("admin_login", { actor: admin.username });
   setAdminCookie(reply, token);
-  sendJson(reply, 200, { ok: true });
+  sendJson(reply, 200, { ok: true, admin: serializeAdmin(admin) });
 }
 
 async function handleAdminLogout(request, reply) {
   const token = parseCookies(request).get(config.adminCookieName);
+  const admin = getAuthenticatedAdmin(request);
   if (token) {
-    adminTokens.delete(token);
+    statements.deleteAdminSession.run(token);
   }
-  recordAuditLog("admin_logout", { actor: "admin" });
+  recordAuditLog("admin_logout", { actor: admin?.username || "unknown" });
   clearAdminCookie(reply);
   sendJson(reply, 200, { ok: true });
+}
+
+async function getCurrentAdmin(request, reply) {
+  sendJson(reply, 200, { admin: serializeAdmin(request.admin) });
 }
 
 async function getChatSession(request, reply) {
@@ -744,7 +899,8 @@ async function getAdminSession(request, reply) {
     session: {
       ...summarizeSession(session),
       canRegenerate: canRegenerate(session),
-      messages: session.messages.map(serializeMessage)
+      messages: session.messages.map(serializeMessage),
+      auditLogs: statements.selectAuditLogsBySession.all(session.id, 30).map(serializeAuditLog)
     }
   });
 }
@@ -788,7 +944,7 @@ async function sendAdminReply(request, reply) {
   queueReply(session, content, delayMs);
   recordAuditLog("admin_reply", {
     sessionId: session.id,
-    actor: "admin",
+    actor: request.admin?.username || "admin",
     detail: { delayMs, length: content.length }
   });
   sendJson(reply, delayMs > 0 ? 202 : 201, {
@@ -816,7 +972,7 @@ async function revealPrank(request, reply) {
   session.revealed = true;
   clearManualTyping(session);
   touch(session);
-  recordAuditLog("reveal_prank", { sessionId: session.id, actor: "admin" });
+  recordAuditLog("reveal_prank", { sessionId: session.id, actor: request.admin?.username || "admin" });
   sendJson(reply, 201, { ok: true, revealed: true });
 }
 
@@ -827,6 +983,7 @@ function registerRoutes(app) {
 
   app.post("/api/admin/login", handleAdminLogin);
   app.all("/api/admin/logout", handleAdminLogout);
+  app.get("/api/admin/me", { preHandler: requireAdmin }, getCurrentAdmin);
 
   app.get("/api/chat/:sessionId", getChatSession);
   app.post("/api/chat/:sessionId/messages", postChatMessage);
@@ -870,6 +1027,7 @@ function clearAllTimers() {
   }
 }
 
+ensureConfiguredAdmins();
 loadSessionsFromDatabase();
 const cleanupTimer = setInterval(cleanupExpiredSessions, 60 * 60 * 1000);
 cleanupTimer.unref();
@@ -899,7 +1057,8 @@ async function start() {
     console.log(`魔丸 prank server is running at http://${config.host}:${config.port}`);
     console.log(`Visitor page: http://${config.host}:${config.port}/`);
     console.log(`Admin console: http://${config.host}:${config.port}/admin.html`);
-    if (!process.env.ADMIN_PASSWORD) {
+    if (config.generatedAdminPassword) {
+      console.log(`Generated admin account: ${config.adminUsername}`);
       console.log(`Generated admin password: ${config.adminPassword}`);
     }
   } catch (error) {

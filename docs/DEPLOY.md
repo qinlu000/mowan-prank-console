@@ -8,7 +8,7 @@
 
 ```powershell
 pnpm install
-.\scripts\start-local.ps1 -AdminPassword "换成你的后台密码"
+.\scripts\start-local.ps1 -AdminUsername "admin" -AdminPassword "换成你的后台密码"
 ```
 
 打开：
@@ -28,6 +28,23 @@ $env:SESSION_RETENTION_DAYS="7"
 
 服务启动时会加载 SQLite 中未过期的会话，并清理超过保留天数的会话和消息。
 
+## 管理员账号
+
+单管理员可以用：
+
+```powershell
+$env:ADMIN_USERNAME="admin"
+$env:ADMIN_PASSWORD="换成你的后台密码"
+```
+
+多管理员可以用：
+
+```powershell
+$env:ADMIN_USERS="admin:换成你的后台密码,friend:换成朋友的后台密码"
+```
+
+`ADMIN_USERS` 会在服务启动时创建或更新这些账号。后台回复、摊牌和登录退出都会写入操作日志，便于多人同时操作时追溯。
+
 ## cpolar 内网穿透
 
 先确保本地服务已经运行，然后启动隧道：
@@ -43,5 +60,5 @@ $env:SESSION_RETENTION_DAYS="7"
 - 不要提交 `.env`
 - 不要提交 `cpolar.yml`
 - 不要提交 cpolar 的 authtoken
-- 不要把真实后台密码写进 README 或脚本
-- 如果开公网，先设置强后台密码
+- 不要把真实后台账号或密码写进 README、脚本或提交记录
+- 如果开公网，先设置强后台账号和密码

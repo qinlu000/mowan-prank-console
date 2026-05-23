@@ -634,7 +634,7 @@ input:focus {
 
 .session-sidebar {
   display: grid;
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
 }
 
 .admin-topbar,
@@ -651,6 +651,28 @@ input:focus {
 
 .session-toolbar {
   padding: 14px 16px;
+}
+
+.operator-badge {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  background: #fbfbfb;
+  font-size: 0.82rem;
+}
+
+.operator-badge strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-list {
@@ -705,7 +727,8 @@ input:focus {
 
 .session-item-meta {
   display: flex;
-  justify-content: space-between;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   color: var(--muted);
   font-size: 0.76rem;
@@ -713,10 +736,11 @@ input:focus {
 
 .operator-panel {
   display: grid;
-  grid-template-rows: auto 1fr auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
 }
 
 .admin-messages {
+  min-height: 0;
   padding: 20px;
   background: #fbfbfb;
 }
@@ -736,6 +760,48 @@ input:focus {
 .quick-replies {
   padding: 14px 16px 0;
   background: var(--surface);
+}
+
+.audit-panel {
+  max-height: 154px;
+  overflow-y: auto;
+  display: grid;
+  gap: 7px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.audit-panel:empty {
+  display: none;
+}
+
+.audit-title {
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.audit-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.audit-item span {
+  min-width: 0;
+  overflow: hidden;
+  color: #333333;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audit-item time {
+  flex: 0 0 auto;
 }
 
 .reply-box {

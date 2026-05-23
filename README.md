@@ -8,7 +8,7 @@
 
 - 仿 ChatGPT 风格的访客聊天页
 - 后台会话列表和手动回复控制台
-- 后台登录保护，密码通过 `ADMIN_PASSWORD` 设置
+- 后台登录保护，支持 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 和 `ADMIN_USERS` 多管理员配置
 - 访客发送后显示“正在思考”
 - 后台回复在访客端流式输出
 - 支持停止生成和重新生成
@@ -38,7 +38,7 @@ volta install node@22.19.0 pnpm@11.2.2
 
 ```powershell
 pnpm install
-.\scripts\start-local.ps1 -AdminPassword "换成你的后台密码"
+.\scripts\start-local.ps1 -AdminUsername "admin" -AdminPassword "换成你的后台密码"
 ```
 
 打开：
@@ -50,11 +50,19 @@ pnpm install
 也可以手动设置环境变量：
 
 ```powershell
+$env:ADMIN_USERNAME="admin"
 $env:ADMIN_PASSWORD="换成你的后台密码"
 pnpm start
 ```
 
-如果不设置 `ADMIN_PASSWORD`，服务启动时会在终端生成一个临时后台密码。聊天数据默认保存到 `data/mowan.sqlite`，`data/` 不会提交到 Git。
+如果要一次配置多个管理员，可以设置：
+
+```powershell
+$env:ADMIN_USERS="admin:换成你的后台密码,friend:换成朋友的后台密码"
+pnpm start
+```
+
+`ADMIN_USERS` 会在服务启动时创建或更新这些管理员账号。没有设置 `ADMIN_PASSWORD` 或 `ADMIN_USERS` 时，服务启动会在终端生成一个临时后台账号和密码。聊天数据默认保存到 `data/mowan.sqlite`，`data/` 不会提交到 Git。
 
 ## 常用命令
 
@@ -70,6 +78,7 @@ pnpm run dev
 - `SESSION_RETENTION_DAYS` 默认是 `7`
 - 服务启动时会加载未过期会话
 - 服务启动后会定时清理过期会话和消息
+- 管理员登录会话、回复记录和摊牌操作会写入 SQLite，后台可查看最近操作日志
 
 ## 内网穿透
 
@@ -96,7 +105,7 @@ pnpm run dev
 ├── public/              # 前端页面和静态资源
 ├── scripts/             # 本地启动和 cpolar 辅助脚本
 ├── docs/                # 部署说明
-├── server.js            # Node 后端和内存会话状态
+├── server.js            # Node/Fastify 后端和 SQLite 会话状态
 ├── package.json
 └── .env.example
 ```

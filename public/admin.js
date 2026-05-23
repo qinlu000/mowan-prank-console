@@ -3,6 +3,8 @@ const sessionCountEl = document.querySelector("#sessionCount");
 const adminMessagesEl = document.querySelector("#adminMessages");
 const activeTitleEl = document.querySelector("#activeTitle");
 const activeMetaEl = document.querySelector("#activeMeta");
+const operatorNameEl = document.querySelector("#operatorName");
+const auditPanelEl = document.querySelector("#auditPanel");
 const refreshButton = document.querySelector("#refreshButton");
 const revealButton = document.querySelector("#revealButton");
 const replyForm = document.querySelector("#replyForm");
@@ -15,6 +17,7 @@ let sessions = [];
 let activeSessionId = null;
 let activeSignature = "";
 let typingTimer = null;
+let currentAdmin = null;
 
 function redirectToLogin() {
   window.location.href = "/admin-login.html";
@@ -46,6 +49,27 @@ function relativeTime(value) {
     return `${Math.floor(seconds / 60)} 分钟前`;
   }
   return `${Math.floor(seconds / 3600)} 小时前`;
+}
+
+function describeAuditLog(log) {
+  if (!log) {
+    return "";
+  }
+
+  const actor = log.actor || "系统";
+  const actionLabels = {
+    admin_login: "登录后台",
+    admin_logout: "退出后台",
+    admin_reply: "发送回复",
+    cleanup_expired_sessions: "清理过期会话",
+    regenerate_request: "请求重新生成",
+    reveal_prank: "点击摊牌",
+    session_created: "创建会话",
+    stop_generation: "停止生成",
+    user_message: "发送消息"
+  };
+  const label = actionLabels[log.action] || log.action;
+  return `${actor} · ${label}`;
 }
 
 function previewText(session) {
@@ -104,7 +128,10 @@ function renderSessionList() {
     const time = document.createElement("span");
     time.textContent = relativeTime(session.updatedAt);
 
-    meta.append(count, time);
+    const operation = document.createElement("span");
+    operation.textContent = describeAuditLog(session.lastAuditLog) || "暂无操作";
+
+    meta.append(count, operation, time);
     button.append(title, preview, meta);
     return button;
   });
@@ -162,6 +189,34 @@ function createSystemNotice(text) {
   return row;
 }
 
+function renderAuditLogs(logs = []) {
+  if (!logs.length) {
+    auditPanelEl.replaceChildren();
+    return;
+  }
+
+  const title = document.createElement("div");
+  title.className = "audit-title";
+  title.textContent = "操作日志";
+
+  const items = logs.slice(0, 8).map((log) => {
+    const item = document.createElement("div");
+    item.className = "audit-item";
+
+    const main = document.createElement("span");
+    main.textContent = describeAuditLog(log);
+
+    const time = document.createElement("time");
+    time.dateTime = log.createdAt;
+    time.textContent = formatTime(log.createdAt);
+
+    item.append(main, time);
+    return item;
+  });
+
+  auditPanelEl.replaceChildren(title, ...items);
+}
+
 function setComposerEnabled(enabled) {
   replyInput.disabled = !enabled;
   replyButton.disabled = !enabled;
@@ -188,7 +243,8 @@ function renderActiveSession(session) {
     typing: session.adminTyping,
     generating: session.isGenerating,
     revealed: session.revealed,
-    regenerate: session.regenerateRequest?.id || ""
+    regenerate: session.regenerateRequest?.id || "",
+    auditLogs: (session.auditLogs || []).map((log) => `${log.id}:${log.actor}:${log.action}`)
   });
   if (signature === activeSignature) {
     return;
@@ -205,6 +261,7 @@ function renderActiveSession(session) {
   }
 
   adminMessagesEl.replaceChildren(...rows);
+  renderAuditLogs(session.auditLogs || []);
 
   if (shouldStickToBottom) {
     adminMessagesEl.scrollTop = adminMessagesEl.scrollHeight;
@@ -223,6 +280,18 @@ function renderNoActiveSession() {
   empty.className = "empty-state";
   empty.textContent = "选择一个会话后，就可以在这里手动扮演魔丸回复。";
   adminMessagesEl.replaceChildren(empty);
+  auditPanelEl.replaceChildren();
+}
+
+async function fetchCurrentAdmin() {
+  const response = await fetch("/api/admin/me");
+  const payload = await readPayload(response);
+  if (!response.ok) {
+    throw new Error(payload.error || "无法读取管理员信息");
+  }
+
+  currentAdmin = payload.admin;
+  operatorNameEl.textContent = currentAdmin?.username || "未知";
 }
 
 async function fetchSessions() {
@@ -256,6 +325,9 @@ async function fetchActiveSession() {
 
 async function refreshAll() {
   try {
+    if (!currentAdmin) {
+      await fetchCurrentAdmin();
+    }
     await fetchSessions();
     await fetchActiveSession();
   } catch (error) {
