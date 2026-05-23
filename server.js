@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { randomUUID, timingSafeEqual } = require("node:crypto");
+const { DatabaseSync } = require("node:sqlite");
 const fastify = require("fastify");
 
 const config = {
@@ -8,7 +9,9 @@ const config = {
   port: Number(process.env.PORT || 5173),
   publicDir: path.resolve(__dirname, "public"),
   adminCookieName: "mowan_admin",
-  adminPassword: process.env.ADMIN_PASSWORD || randomUUID().slice(0, 12)
+  adminPassword: process.env.ADMIN_PASSWORD || randomUUID().slice(0, 12),
+  databaseUrl: process.env.DATABASE_URL || "file:data/mowan.sqlite",
+  sessionRetentionDays: Number(process.env.SESSION_RETENTION_DAYS || 7)
 };
 
 const newVisitorTitle = "新访客";
@@ -27,6 +30,117 @@ const mimeTypes = new Map([
 function now() {
   return new Date().toISOString();
 }
+
+function resolveDatabasePath(databaseUrl) {
+  if (databaseUrl === ":memory:") {
+    return databaseUrl;
+  }
+
+  const value = databaseUrl.startsWith("file:") ? databaseUrl.slice(5) : databaseUrl;
+  return path.isAbsolute(value) ? value : path.resolve(__dirname, value);
+}
+
+function parseJson(value, fallback = null) {
+  if (!value) {
+    return fallback;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function createDatabase() {
+  const databasePath = resolveDatabasePath(config.databaseUrl);
+  if (databasePath !== ":memory:") {
+    fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+  }
+
+  const database = new DatabaseSync(databasePath);
+  database.exec(`
+    PRAGMA foreign_keys = ON;
+    PRAGMA journal_mode = WAL;
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      admin_typing INTEGER NOT NULL DEFAULT 0,
+      revealed INTEGER NOT NULL DEFAULT 0,
+      regenerate_request TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      status TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_messages_session_position
+      ON messages(session_id, position);
+
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id TEXT PRIMARY KEY,
+      session_id TEXT,
+      actor TEXT NOT NULL,
+      action TEXT NOT NULL,
+      detail TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_session_created
+      ON audit_logs(session_id, created_at);
+  `);
+
+  database
+    .prepare("UPDATE messages SET status = 'stopped', updated_at = ? WHERE status = 'streaming'")
+    .run(now());
+
+  return database;
+}
+
+const db = createDatabase();
+const statements = {
+  upsertSession: db.prepare(`
+    INSERT INTO sessions (
+      id, title, created_at, updated_at, last_seen_at, admin_typing, revealed, regenerate_request
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      title = excluded.title,
+      updated_at = excluded.updated_at,
+      last_seen_at = excluded.last_seen_at,
+      admin_typing = excluded.admin_typing,
+      revealed = excluded.revealed,
+      regenerate_request = excluded.regenerate_request
+  `),
+  upsertMessage: db.prepare(`
+    INSERT INTO messages (
+      id, session_id, role, content, created_at, updated_at, status, position
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      content = excluded.content,
+      updated_at = excluded.updated_at,
+      status = excluded.status,
+      position = excluded.position
+  `),
+  selectSessions: db.prepare("SELECT * FROM sessions ORDER BY updated_at DESC"),
+  selectMessages: db.prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY position ASC"),
+  deleteExpiredSessions: db.prepare("DELETE FROM sessions WHERE updated_at < ?"),
+  insertAuditLog: db.prepare(`
+    INSERT INTO audit_logs (id, session_id, actor, action, detail, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `)
+};
 
 function createMessage(role, content, extra = {}) {
   return {
@@ -49,6 +163,96 @@ function serializeMessage(message) {
     updatedAt: message.updatedAt || message.createdAt,
     status: message.status || "complete"
   };
+}
+
+function persistSession(session) {
+  statements.upsertSession.run(
+    session.id,
+    session.title,
+    session.createdAt,
+    session.updatedAt,
+    session.lastSeenAt,
+    session.adminTyping ? 1 : 0,
+    session.revealed ? 1 : 0,
+    session.regenerateRequest ? JSON.stringify(session.regenerateRequest) : null
+  );
+}
+
+function persistMessage(session, message) {
+  const position = session.messages.findIndex((item) => item.id === message.id);
+  statements.upsertMessage.run(
+    message.id,
+    session.id,
+    message.role,
+    message.content,
+    message.createdAt,
+    message.updatedAt || message.createdAt,
+    message.status || "complete",
+    position < 0 ? session.messages.length : position
+  );
+}
+
+function persistAllMessages(session) {
+  for (const message of session.messages) {
+    persistMessage(session, message);
+  }
+}
+
+function recordAuditLog(action, { sessionId = null, actor = "system", detail = null } = {}) {
+  statements.insertAuditLog.run(
+    randomUUID(),
+    sessionId,
+    actor,
+    action,
+    detail ? JSON.stringify(detail) : null,
+    now()
+  );
+}
+
+function hydrateSession(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastSeenAt: row.last_seen_at,
+    adminTyping: Boolean(row.admin_typing),
+    revealed: Boolean(row.revealed),
+    regenerateRequest: parseJson(row.regenerate_request, null),
+    generation: null,
+    pendingTimers: new Set(),
+    messages: statements.selectMessages.all(row.id).map((messageRow) => ({
+      id: messageRow.id,
+      role: messageRow.role,
+      content: messageRow.content,
+      createdAt: messageRow.created_at,
+      updatedAt: messageRow.updated_at,
+      status: messageRow.status
+    }))
+  };
+}
+
+function cleanupExpiredSessions() {
+  const retentionDays = Number.isFinite(config.sessionRetentionDays)
+    ? Math.max(0, config.sessionRetentionDays)
+    : 7;
+  if (retentionDays <= 0) {
+    return;
+  }
+
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+  const result = statements.deleteExpiredSessions.run(cutoff);
+  if (result.changes > 0) {
+    recordAuditLog("cleanup_expired_sessions", { detail: { cutoff, count: result.changes } });
+  }
+}
+
+function loadSessionsFromDatabase() {
+  cleanupExpiredSessions();
+  for (const row of statements.selectSessions.all()) {
+    const session = hydrateSession(row);
+    sessions.set(session.id, session);
+  }
 }
 
 function isValidSessionId(id) {
@@ -80,6 +284,10 @@ function getSession(id) {
         )
       ]
     });
+    const session = sessions.get(id);
+    persistSession(session);
+    persistAllMessages(session);
+    recordAuditLog("session_created", { sessionId: id });
   }
 
   return sessions.get(id);
@@ -87,6 +295,7 @@ function getSession(id) {
 
 function touch(session) {
   session.updatedAt = now();
+  persistSession(session);
 }
 
 function lastAssistantMessage(session) {
@@ -266,6 +475,7 @@ function stopActiveGeneration(session, status = "stopped") {
     if (message && message.status === "streaming") {
       message.status = status;
       message.updatedAt = now();
+      persistMessage(session, message);
     }
   }
 
@@ -331,10 +541,12 @@ function queueStreamStep(session) {
       message.status = "complete";
       session.generation = null;
       session.adminTyping = false;
+      persistMessage(session, message);
       touch(session);
       return;
     }
 
+    persistMessage(session, message);
     touch(session);
     queueStreamStep(session);
   }, nextStreamDelay(generation.target, generation.index));
@@ -346,6 +558,7 @@ function queueStreamStep(session) {
 function startStreamingReply(session, content) {
   const message = createMessage("assistant", "", { status: "streaming" });
   session.messages.push(message);
+  persistMessage(session, message);
   session.adminTyping = false;
   session.regenerateRequest = null;
   session.generation = {
@@ -413,6 +626,7 @@ async function handleAdminLogin(request, reply) {
 
   const token = randomUUID();
   adminTokens.add(token);
+  recordAuditLog("admin_login", { actor: "admin" });
   setAdminCookie(reply, token);
   sendJson(reply, 200, { ok: true });
 }
@@ -422,6 +636,7 @@ async function handleAdminLogout(request, reply) {
   if (token) {
     adminTokens.delete(token);
   }
+  recordAuditLog("admin_logout", { actor: "admin" });
   clearAdminCookie(reply);
   sendJson(reply, 200, { ok: true });
 }
@@ -433,6 +648,7 @@ async function getChatSession(request, reply) {
   }
 
   session.lastSeenAt = now();
+  persistSession(session);
   sendJson(reply, 200, publicSession(session));
 }
 
@@ -443,6 +659,7 @@ async function postChatMessage(request, reply) {
   }
 
   session.lastSeenAt = now();
+  persistSession(session);
   const body = requestBody(request);
   const content = String(body.content || "").trim();
   if (!content) {
@@ -456,13 +673,16 @@ async function postChatMessage(request, reply) {
   }
 
   stopActiveGeneration(session, "stopped");
-  session.messages.push(createMessage("user", content));
+  const message = createMessage("user", content);
+  session.messages.push(message);
+  persistMessage(session, message);
   if (session.title === newVisitorTitle) {
     session.title = content.length > 28 ? `${content.slice(0, 28)}...` : content;
   }
   session.regenerateRequest = null;
   session.adminTyping = true;
   touch(session);
+  recordAuditLog("user_message", { sessionId: session.id, actor: "visitor" });
   sendJson(reply, 201, publicSession(session));
 }
 
@@ -474,6 +694,10 @@ async function stopChatGeneration(request, reply) {
 
   session.lastSeenAt = now();
   const stopped = stopActiveGeneration(session, "stopped");
+  persistSession(session);
+  if (stopped) {
+    recordAuditLog("stop_generation", { sessionId: session.id, actor: "visitor" });
+  }
   sendJson(reply, 200, { ok: true, stopped, session: publicSession(session) });
 }
 
@@ -484,6 +708,7 @@ async function requestRegenerate(request, reply) {
   }
 
   session.lastSeenAt = now();
+  persistSession(session);
   const lastAssistant = lastAssistantMessage(session);
   if (!lastAssistant) {
     sendError(reply, 400, "还没有可重新生成的回复");
@@ -498,6 +723,7 @@ async function requestRegenerate(request, reply) {
   };
   session.adminTyping = true;
   touch(session);
+  recordAuditLog("regenerate_request", { sessionId: session.id, actor: "visitor" });
   sendJson(reply, 200, { ok: true, session: publicSession(session) });
 }
 
@@ -560,6 +786,11 @@ async function sendAdminReply(request, reply) {
 
   const delayMs = Math.max(0, Math.min(Number(body.delayMs || 0), 8000));
   queueReply(session, content, delayMs);
+  recordAuditLog("admin_reply", {
+    sessionId: session.id,
+    actor: "admin",
+    detail: { delayMs, length: content.length }
+  });
   sendJson(reply, delayMs > 0 ? 202 : 201, {
     ok: true,
     queued: delayMs > 0,
@@ -576,15 +807,16 @@ async function revealPrank(request, reply) {
   }
 
   stopActiveGeneration(session, "stopped");
-  session.messages.push(
-    createMessage(
-      "assistant",
-      "摊牌了：这个聊天窗口背后不是大模型，是有人在后台手动回复你。你刚刚参与了一个 LLM 网站整蛊实验。"
-    )
+  const message = createMessage(
+    "assistant",
+    "摊牌了：这个聊天窗口背后不是大模型，是有人在后台手动回复你。你刚刚参与了一个 LLM 网站整蛊实验。"
   );
+  session.messages.push(message);
+  persistMessage(session, message);
   session.revealed = true;
   clearManualTyping(session);
   touch(session);
+  recordAuditLog("reveal_prank", { sessionId: session.id, actor: "admin" });
   sendJson(reply, 201, { ok: true, revealed: true });
 }
 
@@ -638,6 +870,10 @@ function clearAllTimers() {
   }
 }
 
+loadSessionsFromDatabase();
+const cleanupTimer = setInterval(cleanupExpiredSessions, 60 * 60 * 1000);
+cleanupTimer.unref();
+
 const app = fastify({
   bodyLimit: 100_000,
   logger: false
@@ -650,7 +886,11 @@ app.setErrorHandler((error, request, reply) => {
 });
 
 app.setNotFoundHandler(handleStaticRequest);
-app.addHook("onClose", clearAllTimers);
+app.addHook("onClose", async () => {
+  clearAllTimers();
+  clearInterval(cleanupTimer);
+  db.close();
+});
 registerRoutes(app);
 
 async function start() {

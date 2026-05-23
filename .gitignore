@@ -5,6 +5,7 @@ node_modules/
 *.log
 dist/
 coverage/
+data/
 .DS_Store
 Thumbs.db
 *.zip

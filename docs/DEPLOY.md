@@ -2,6 +2,8 @@
 
 魔丸需要 Node 后端保存会话状态，所以不能只放到 GitHub Pages。GitHub Pages 只能托管静态文件，不能运行 `server.js`。
 
+默认 SQLite 数据库路径是 `data/mowan.sqlite`。正式部署时要保留 `data/` 目录或把 `DATABASE_URL` 指到持久化磁盘。
+
 ## 本地运行
 
 ```powershell
@@ -14,6 +16,17 @@ pnpm install
 - 访客页：http://127.0.0.1:5173/
 - 后台页：http://127.0.0.1:5173/admin.html
 - 健康检查：http://127.0.0.1:5173/healthz
+
+## 数据保留
+
+默认配置：
+
+```powershell
+$env:DATABASE_URL="file:data/mowan.sqlite"
+$env:SESSION_RETENTION_DAYS="7"
+```
+
+服务启动时会加载 SQLite 中未过期的会话，并清理超过保留天数的会话和消息。
 
 ## cpolar 内网穿透
 
