@@ -1,4 +1,5 @@
-const storageKey = "astrachat-prank-session-id";
+const legacyStorageKeys = ["astra" + "chat-prank-session-id"];
+const storageKey = "mowan-prank-session-id";
 const messagesEl = document.querySelector("#messages");
 const composer = document.querySelector("#composer");
 const input = document.querySelector("#messageInput");
@@ -12,6 +13,10 @@ let sessionId = getSessionId();
 let lastRenderSignature = "";
 let isSending = false;
 let latestSession = null;
+
+for (const key of legacyStorageKeys) {
+  localStorage.removeItem(key);
+}
 
 function getSessionId() {
   const existing = localStorage.getItem(storageKey);
@@ -53,7 +58,7 @@ function createBubble(message) {
 
   const meta = document.createElement("div");
   meta.className = "message-meta";
-  meta.textContent = `${message.role === "user" ? "你" : "AstraChat"} · ${formatTime(message.createdAt)}`;
+  meta.textContent = `${message.role === "user" ? "你" : "魔丸"} · ${formatTime(message.createdAt)}`;
 
   const content = document.createElement("div");
   content.className = "message-content";
@@ -71,7 +76,7 @@ function createTypingBubble() {
 
   const bubble = document.createElement("div");
   bubble.className = "bubble typing";
-  bubble.setAttribute("aria-label", "AstraChat 正在思考");
+  bubble.setAttribute("aria-label", "魔丸 正在思考");
 
   const label = document.createElement("span");
   label.className = "typing-label";

@@ -65,7 +65,7 @@ function previewText(session) {
     return "暂无消息";
   }
 
-  const prefix = session.lastMessage.role === "user" ? "访客：" : "AstraChat：";
+  const prefix = session.lastMessage.role === "user" ? "访客：" : "魔丸：";
   return `${prefix}${session.lastMessage.content}`;
 }
 
@@ -122,7 +122,7 @@ function createMessageRow(message) {
 
   const meta = document.createElement("div");
   meta.className = "message-meta";
-  meta.textContent = `${message.role === "user" ? "访客" : "AstraChat"} · ${formatTime(message.createdAt)}`;
+  meta.textContent = `${message.role === "user" ? "访客" : "魔丸"} · ${formatTime(message.createdAt)}`;
 
   const content = document.createElement("div");
   content.className = "message-content";
@@ -221,7 +221,7 @@ function renderNoActiveSession() {
 
   const empty = document.createElement("div");
   empty.className = "empty-state";
-  empty.textContent = "选择一个会话后，就可以在这里手动扮演 AstraChat 回复。";
+  empty.textContent = "选择一个会话后，就可以在这里手动扮演魔丸回复。";
   adminMessagesEl.replaceChildren(empty);
 }
 

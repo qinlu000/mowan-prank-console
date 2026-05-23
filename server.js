@@ -7,7 +7,7 @@ const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 5173);
 const publicDir = path.resolve(__dirname, "public");
 const newVisitorTitle = "新访客";
-const adminCookieName = "astrachat_admin";
+const adminCookieName = "mowan_admin";
 const generatedAdminPassword = randomUUID().slice(0, 12);
 const adminPassword = process.env.ADMIN_PASSWORD || generatedAdminPassword;
 
@@ -75,7 +75,7 @@ function getSession(id) {
       messages: [
         createMessage(
           "assistant",
-          "你好，我是 AstraChat。把你的问题交给我，我会尽量给出清晰、直接的回答。"
+          "你好，我是魔丸。把你的问题交给我，我会尽量给出清晰、直接的回答。"
         )
       ]
     });
@@ -687,7 +687,7 @@ async function handleRequest(req, res) {
 const server = http.createServer(handleRequest);
 
 server.listen(port, host, () => {
-  console.log(`AstraChat prank server is running at http://${host}:${port}`);
+  console.log(`魔丸 prank server is running at http://${host}:${port}`);
   console.log(`Visitor page: http://${host}:${port}/`);
   console.log(`Admin console: http://${host}:${port}/admin.html`);
   if (!process.env.ADMIN_PASSWORD) {

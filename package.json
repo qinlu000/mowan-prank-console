@@ -1,8 +1,8 @@
 {
-  "name": "llm-prank-console",
+  "name": "mowan-prank-console",
   "version": "0.1.0",
   "private": true,
-  "description": "A local fake LLM chat site with a human-operated admin console.",
+  "description": "A local fake LLM chat site branded as 魔丸 with a human-operated admin console.",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",

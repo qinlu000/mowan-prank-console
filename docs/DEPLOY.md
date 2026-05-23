@@ -1,6 +1,6 @@
 # 部署和内网穿透
 
-这个项目需要 Node 后端保存会话状态，所以不能只放到 GitHub Pages。GitHub Pages 只能托管静态文件，不能运行 `server.js`。
+魔丸需要 Node 后端保存会话状态，所以不能只放到 GitHub Pages。GitHub Pages 只能托管静态文件，不能运行 `server.js`。
 
 ## 本地运行
 
