@@ -1,0 +1,40 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: 5173
+      DATABASE_URL: file:/data/mowan.sqlite
+      SESSION_RETENTION_DAYS: ${SESSION_RETENTION_DAYS:-7}
+      ADMIN_USERS: ${ADMIN_USERS:?Set ADMIN_USERS in .env before starting}
+      COOKIE_SECRET: ${COOKIE_SECRET:-change-this-cookie-secret}
+    volumes:
+      - mowan_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5173/healthz | grep -q '\"ok\":true'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env before starting}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  mowan_data:
+  caddy_data:
+  caddy_config:

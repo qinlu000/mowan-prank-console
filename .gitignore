@@ -6,6 +6,7 @@ node_modules/
 dist/
 coverage/
 data/
+backups/
 .DS_Store
 Thumbs.db
 *.zip

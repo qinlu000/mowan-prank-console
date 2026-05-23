@@ -1,0 +1,12 @@
+node_modules
+data
+backups
+.git
+.codex
+.env
+.env.*
+!.env.example
+*.log
+*.zip
+*.msi
+cpolar.yml

@@ -81,6 +81,16 @@ pnpm run dev
 - 服务启动后会定时清理过期会话和消息
 - 管理员登录会话、回复记录和摊牌操作会写入 SQLite，后台可查看最近操作日志
 
+## Docker 部署
+
+复制 `.env.example` 为 `.env`，至少设置 `DOMAIN`、`ADMIN_USERS` 和 `COOKIE_SECRET`，然后在 VPS 上运行：
+
+```bash
+docker compose up -d --build
+```
+
+Caddy 会自动申请 HTTPS 证书。SQLite 数据保存在 Docker volume 中，可以用 `scripts/backup-sqlite.ps1` 和 `scripts/restore-sqlite.ps1` 备份恢复。
+
 ## 内网穿透
 
 本仓库提供 cpolar 辅助脚本，默认使用中国节点：
@@ -106,6 +116,9 @@ pnpm run dev
 ├── public/              # 前端页面和静态资源
 ├── scripts/             # 本地启动和 cpolar 辅助脚本
 ├── docs/                # 部署说明
+├── Dockerfile
+├── docker-compose.yml
+├── Caddyfile
 ├── server.js            # Node/Fastify 后端和 SQLite 会话状态
 ├── package.json
 └── .env.example
@@ -115,6 +128,6 @@ pnpm run dev
 
 - 不要提交 `.env`
 - 不要提交 cpolar authtoken
-- 不要把真实后台密码写进 README、脚本或提交记录
-- 开公网前务必设置强后台密码
-- 不要把 `/admin.html` 和后台密码发给访客
+- 不要把真实后台账号或密码写进 README、脚本或提交记录
+- 开公网前务必设置强后台账号和密码
+- 不要把 `/admin.html` 和后台账号密码发给访客
