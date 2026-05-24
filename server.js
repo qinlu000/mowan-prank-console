@@ -676,77 +676,52 @@ function touch(session) {
   broadcastSessionUpdate(session);
 }
 
-function currentUserTurn(session) {
-  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
-    const message = session.messages[index];
-    if (message.role === "user") {
-      return { message, index };
-    }
-  }
-  return null;
-}
-
-function replyForUserTurn(session, userIndex) {
-  if (userIndex < 0) {
+function currentTurn(session) {
+  const index = session.messages.findLastIndex((message) => message.role === "user");
+  if (index < 0) {
     return null;
   }
 
-  for (let index = userIndex + 1; index < session.messages.length; index += 1) {
-    const message = session.messages[index];
-    if (message.role === "user") {
-      return null;
-    }
-    if (message.role === "assistant") {
-      return message;
-    }
-  }
-  return null;
+  const reply = session.messages.slice(index + 1).find((message) => message.role === "assistant") || null;
+  const completeReply = reply?.status === "complete" ? reply : null;
+  const canReplace = Boolean(completeReply && session.regenerateRequest?.previousMessageId === completeReply.id);
+  return {
+    message: session.messages[index],
+    index,
+    reply,
+    completeReply,
+    canReply: !completeReply || canReplace,
+    targetMessageId: session.regenerateRequest?.previousMessageId || reply?.id || null
+  };
 }
 
 function currentReplyMessage(session) {
-  const turn = currentUserTurn(session);
-  return turn ? replyForUserTurn(session, turn.index) : null;
+  return currentTurn(session)?.reply || null;
 }
 
 function currentCompleteReply(session) {
-  const reply = currentReplyMessage(session);
-  return reply && reply.status === "complete" ? reply : null;
-}
-
-function canReplaceCurrentReply(session, reply = currentCompleteReply(session)) {
-  return Boolean(reply && session.regenerateRequest?.previousMessageId === reply.id);
+  return currentTurn(session)?.completeReply || null;
 }
 
 function canCompleteCurrentTurn(session) {
-  const turn = currentUserTurn(session);
-  if (!turn) {
-    return false;
-  }
-
-  const completeReply = currentCompleteReply(session);
-  return !completeReply || canReplaceCurrentReply(session, completeReply);
+  return Boolean(currentTurn(session)?.canReply);
 }
 
 function currentReplyTargetId(session) {
-  const currentReply = currentReplyMessage(session);
-  if (session.regenerateRequest?.previousMessageId) {
-    return session.regenerateRequest.previousMessageId;
-  }
-  return currentReply?.id || null;
+  return currentTurn(session)?.targetMessageId || null;
 }
 
 function ensureReplyMessage(session, preferredMessageId = null) {
-  const turn = currentUserTurn(session);
+  const turn = currentTurn(session);
   if (!turn) {
     return null;
   }
 
-  const currentReply = currentReplyMessage(session);
   const existing = preferredMessageId
-    ? currentReply?.id === preferredMessageId
-      ? currentReply
+    ? turn.reply?.id === preferredMessageId
+      ? turn.reply
       : null
-    : currentReply;
+    : turn.reply;
   if (existing) {
     existing.content = "";
     existing.status = "streaming";
@@ -773,9 +748,7 @@ function isVisibleGeneration(generation) {
 function summarizeSession(session) {
   const last = session.messages[session.messages.length - 1];
   const userMessages = session.messages.filter((message) => message.role === "user");
-  const latestAuditLog = serializeAuditLog(statements.selectLatestAuditLogBySession.get(session.id));
   const isGenerating = isVisibleGeneration(session.generation);
-  const completeReply = currentCompleteReply(session);
   const canReply = canCompleteCurrentTurn(session);
   return {
     id: session.id,
@@ -787,18 +760,14 @@ function summarizeSession(session) {
     lastSeenAt: session.lastSeenAt,
     adminTyping: session.adminTyping,
     isGenerating,
-    generationType: session.generation?.type || null,
     replyMode: session.replyMode || "llm",
     canReply,
-    hasFinalReply: Boolean(completeReply && !canReplaceCurrentReply(session, completeReply)),
-    hasPendingQuestion: canReply,
     adminDraft: session.adminDraft,
     regenerateRequested: Boolean(session.regenerateRequest),
     regenerateRequest: session.regenerateRequest,
     revealed: session.revealed,
     messageCount: session.messages.length,
     userMessageCount: userMessages.length,
-    lastAuditLog: latestAuditLog,
     lastMessage: last
       ? {
           role: last.role,
@@ -1069,34 +1038,14 @@ async function sendStatic(urlPath, reply) {
   }
 }
 
-function clearGenerationTimer(session) {
-  if (!session.generation?.timer) {
-    if (!session.generation?.timeout) {
-      return;
+function clearJobTimers(session, job) {
+  for (const key of ["timer", "timeout"]) {
+    if (job?.[key]) {
+      clearTimeout(job[key]);
+      session.pendingTimers.delete(job[key]);
+      job[key] = null;
     }
   }
-
-  if (session.generation.timer) {
-    clearTimeout(session.generation.timer);
-    session.pendingTimers.delete(session.generation.timer);
-    session.generation.timer = null;
-  }
-
-  if (session.generation.timeout) {
-    clearTimeout(session.generation.timeout);
-    session.pendingTimers.delete(session.generation.timeout);
-    session.generation.timeout = null;
-  }
-}
-
-function clearReferenceTimer(session, reference = session.referenceGeneration) {
-  if (!reference?.timeout) {
-    return;
-  }
-
-  clearTimeout(reference.timeout);
-  session.pendingTimers.delete(reference.timeout);
-  reference.timeout = null;
 }
 
 function stopReferenceGeneration(session) {
@@ -1106,7 +1055,7 @@ function stopReferenceGeneration(session) {
 
   session.referenceGeneration.stopped = true;
   session.referenceGeneration.abortController?.abort();
-  clearReferenceTimer(session);
+  clearJobTimers(session, session.referenceGeneration);
   session.referenceGeneration = null;
   return true;
 }
@@ -1118,7 +1067,7 @@ function stopActiveGeneration(session, status = "stopped") {
 
   session.generation.stopped = true;
   session.generation.abortController?.abort();
-  clearGenerationTimer(session);
+  clearJobTimers(session, session.generation);
 
   if (session.generation.messageId) {
     const message = session.messages.find((item) => item.id === session.generation.messageId);
@@ -1238,8 +1187,7 @@ function queueReply(session, content, delayMs, options = {}) {
   }
 
   stopActiveGeneration(session, "stopped");
-  stopReferenceGeneration(session);
-  session.adminDraft = null;
+  clearAdminDraft(session);
   session.adminTyping = true;
   touch(session);
 
@@ -1430,110 +1378,142 @@ async function requestLlmCompletionWithRetry(session, generation) {
   throw lastError;
 }
 
-function startLlmReply(session, options = {}) {
-  if (!config.llmEnabled) {
-    return false;
-  }
-
-  const targetMessageId = options.targetMessageId || currentReplyTargetId(session);
-  const finalReply = currentCompleteReply(session);
-  if (!canCompleteCurrentTurn(session)) {
-    return false;
-  }
-  if (finalReply && finalReply.id !== targetMessageId) {
-    return false;
-  }
-
+function clearAdminDraft(session) {
   stopReferenceGeneration(session);
   session.adminDraft = null;
-  const abortController = new AbortController();
-  const generation = {
-    type: "ai",
-    messageId: null,
-    targetMessageId,
-    abortController,
+}
+
+function setAdminDraft(session, status, fields = {}) {
+  session.adminDraft = {
+    status,
+    content: fields.content || "",
+    error: fields.error || null,
+    forUserMessageId: fields.forUserMessageId || currentTurn(session)?.message.id || null,
+    updatedAt: now()
+  };
+}
+
+function createLlmJob(type, options = {}) {
+  return {
+    type,
+    abortController: new AbortController(),
     excludeMessageId: options.excludeMessageId || null,
     reason: options.reason || "auto",
     startedAt: now(),
     stopped: false,
     timedOut: false,
-    timeout: null
+    timeout: null,
+    ...options
   };
+}
 
-  const timeout = setTimeout(() => {
-    generation.timedOut = true;
-    abortController.abort();
+function llmAuditDetail(job, detail = {}) {
+  return {
+    model: config.llmModel,
+    reason: job.reason,
+    attempts: job.attempts || 1,
+    ...detail
+  };
+}
+
+function llmErrorDetail(job, error) {
+  return llmAuditDetail(job, {
+    timedOut: job.timedOut,
+    message: error.message,
+    cause: error.cause
+      ? {
+          name: error.cause.name,
+          code: error.cause.code,
+          message: error.cause.message
+        }
+      : null
+  });
+}
+
+function runLlmJob(session, slot, job, handlers) {
+  job.timeout = setTimeout(() => {
+    job.timedOut = true;
+    job.abortController.abort();
   }, config.llmTimeoutMs);
 
-  generation.timeout = timeout;
-  session.pendingTimers.add(timeout);
-  session.generation = generation;
-  session.adminTyping = true;
+  session.pendingTimers.add(job.timeout);
+  session[slot] = job;
+  handlers.onStart?.(job);
   touch(session);
 
-  requestLlmCompletionWithRetry(session, generation)
+  requestLlmCompletionWithRetry(session, job)
     .then((content) => {
-      if (session.generation !== generation) {
+      if (session[slot] !== job) {
         return;
       }
-
-      clearGenerationTimer(session);
-      const started = startStreamingReply(session, content, { messageId: generation.targetMessageId });
-      if (!started) {
-        return;
-      }
-      recordAuditLog("llm_reply", {
-        sessionId: session.id,
-        actor: "魔丸",
-        detail: {
-          model: config.llmModel,
-          reason: generation.reason,
-          attempts: generation.attempts || 1,
-          length: content.length
-        }
-      });
+      clearJobTimers(session, job);
+      session[slot] = null;
+      handlers.onSuccess(content, job);
     })
     .catch((error) => {
-      if (session.generation !== generation || generation.stopped) {
+      if (session[slot] !== job || job.stopped) {
         return;
       }
-
-      clearGenerationTimer(session);
-      recordAuditLog("llm_error", {
-        sessionId: session.id,
-        actor: "魔丸",
-        detail: {
-          model: config.llmModel,
-          reason: generation.reason,
-          attempts: generation.attempts || 1,
-          timedOut: generation.timedOut,
-          message: error.message,
-          cause: error.cause
-            ? {
-                name: error.cause.name,
-                code: error.cause.code,
-                message: error.cause.message
-              }
-            : null
-        }
-      });
-      startStreamingReply(session, config.llmFallbackReply, { messageId: generation.targetMessageId });
+      clearJobTimers(session, job);
+      session[slot] = null;
+      handlers.onError(error, job);
     });
 
   return true;
 }
 
-function startLlmReference(session, options = {}) {
-  const turn = currentUserTurn(session);
-  if (!turn || !canCompleteCurrentTurn(session)) {
+function startLlmReply(session, options = {}) {
+  const targetMessageId = options.targetMessageId || currentReplyTargetId(session);
+  const finalReply = currentCompleteReply(session);
+  if (!config.llmEnabled || !canCompleteCurrentTurn(session) || (finalReply && finalReply.id !== targetMessageId)) {
     return false;
   }
 
-  const forUserMessageId = turn.message.id;
+  clearAdminDraft(session);
+  return runLlmJob(
+    session,
+    "generation",
+    createLlmJob("ai", {
+      messageId: null,
+      targetMessageId,
+      excludeMessageId: options.excludeMessageId,
+      reason: options.reason || "auto"
+    }),
+    {
+      onStart: () => {
+        session.adminTyping = true;
+      },
+      onSuccess: (content, generation) => {
+        if (startStreamingReply(session, content, { messageId: generation.targetMessageId })) {
+          recordAuditLog("llm_reply", {
+            sessionId: session.id,
+            actor: "魔丸",
+            detail: llmAuditDetail(generation, { length: content.length })
+          });
+        }
+      },
+      onError: (error, generation) => {
+        recordAuditLog("llm_error", {
+          sessionId: session.id,
+          actor: "魔丸",
+          detail: llmErrorDetail(generation, error)
+        });
+        startStreamingReply(session, config.llmFallbackReply, { messageId: generation.targetMessageId });
+      }
+    }
+  );
+}
+
+function startLlmReference(session, options = {}) {
+  const turn = currentTurn(session);
+  if (!turn?.canReply) {
+    return false;
+  }
+
   const existingDraft = session.adminDraft;
   if (
     !options.force &&
-    existingDraft?.forUserMessageId === forUserMessageId &&
+    existingDraft?.forUserMessageId === turn.message.id &&
     ["generating", "complete"].includes(existingDraft.status)
   ) {
     return true;
@@ -1542,103 +1522,47 @@ function startLlmReference(session, options = {}) {
   stopReferenceGeneration(session);
 
   if (!config.llmEnabled) {
-    session.adminDraft = {
-      status: "unavailable",
-      content: "",
+    setAdminDraft(session, "unavailable", {
       error: "LLM 暂未配置，先手动写一条。",
-      forUserMessageId,
-      updatedAt: now()
-    };
+      forUserMessageId: turn.message.id
+    });
     touch(session);
     return false;
   }
 
-  const abortController = new AbortController();
-  const reference = {
-    type: "reference",
-    abortController,
-    excludeMessageId: currentReplyMessage(session)?.id || null,
-    reason: options.reason || "manual_reference",
-    startedAt: now(),
-    stopped: false,
-    timedOut: false,
-    timeout: null,
-    forUserMessageId
-  };
-
-  const timeout = setTimeout(() => {
-    reference.timedOut = true;
-    abortController.abort();
-  }, config.llmTimeoutMs);
-
-  reference.timeout = timeout;
-  session.pendingTimers.add(timeout);
-  session.referenceGeneration = reference;
-  session.adminDraft = {
-    status: "generating",
-    content: "",
-    error: null,
-    forUserMessageId,
-    updatedAt: now()
-  };
-  touch(session);
-
-  requestLlmCompletionWithRetry(session, reference)
-    .then((content) => {
-      if (session.referenceGeneration !== reference) {
-        return;
+  return runLlmJob(
+    session,
+    "referenceGeneration",
+    createLlmJob("reference", {
+      excludeMessageId: turn.reply?.id,
+      reason: options.reason || "manual_reference",
+      forUserMessageId: turn.message.id
+    }),
+    {
+      onStart: (reference) => setAdminDraft(session, "generating", { forUserMessageId: reference.forUserMessageId }),
+      onSuccess: (content, reference) => {
+        setAdminDraft(session, "complete", { content, forUserMessageId: reference.forUserMessageId });
+        recordAuditLog("llm_reference", {
+          sessionId: session.id,
+          actor: "魔丸",
+          detail: llmAuditDetail(reference, { length: content.length })
+        });
+        touch(session);
+      },
+      onError: (error, reference) => {
+        setAdminDraft(session, "error", {
+          error: reference.timedOut ? "LLM 参考生成超时了，刷新再试。" : "LLM 参考生成失败，可以刷新再试。",
+          forUserMessageId: reference.forUserMessageId
+        });
+        recordAuditLog("llm_reference_error", {
+          sessionId: session.id,
+          actor: "魔丸",
+          detail: llmErrorDetail(reference, error)
+        });
+        touch(session);
       }
-
-      clearReferenceTimer(session, reference);
-      session.referenceGeneration = null;
-      session.adminDraft = {
-        status: "complete",
-        content,
-        error: null,
-        forUserMessageId,
-        updatedAt: now()
-      };
-      recordAuditLog("llm_reference", {
-        sessionId: session.id,
-        actor: "魔丸",
-        detail: {
-          model: config.llmModel,
-          reason: reference.reason,
-          attempts: reference.attempts || 1,
-          length: content.length
-        }
-      });
-      touch(session);
-    })
-    .catch((error) => {
-      if (session.referenceGeneration !== reference || reference.stopped) {
-        return;
-      }
-
-      clearReferenceTimer(session, reference);
-      session.referenceGeneration = null;
-      session.adminDraft = {
-        status: "error",
-        content: "",
-        error: reference.timedOut ? "LLM 参考生成超时了，刷新再试。" : "LLM 参考生成失败，可以刷新再试。",
-        forUserMessageId,
-        updatedAt: now()
-      };
-      recordAuditLog("llm_reference_error", {
-        sessionId: session.id,
-        actor: "魔丸",
-        detail: {
-          model: config.llmModel,
-          reason: reference.reason,
-          attempts: reference.attempts || 1,
-          timedOut: reference.timedOut,
-          message: error.message
-        }
-      });
-      touch(session);
-    });
-
-  return true;
+    }
+  );
 }
 
 function sessionFromRequest(request, reply) {
@@ -1827,8 +1751,7 @@ async function postChatMessage(request, reply) {
   }
 
   stopActiveGeneration(session, "stopped");
-  stopReferenceGeneration(session);
-  session.adminDraft = null;
+  clearAdminDraft(session);
   const message = createMessage("user", content);
   session.messages.push(message);
   persistMessage(session, message);
@@ -1880,8 +1803,7 @@ async function requestRegenerate(request, reply) {
   }
 
   stopActiveGeneration(session, "stopped");
-  stopReferenceGeneration(session);
-  session.adminDraft = null;
+  clearAdminDraft(session);
   session.regenerateRequest = {
     id: randomUUID(),
     createdAt: now(),
@@ -1970,8 +1892,7 @@ async function setReplyMode(request, reply) {
     startLlmReference(session, { reason: "mode_switch_reference", force: true });
   } else if (mode === "llm" && canCompleteCurrentTurn(session)) {
     const targetMessageId = currentReplyTargetId(session);
-    stopReferenceGeneration(session);
-    session.adminDraft = null;
+    clearAdminDraft(session);
     const started = startLlmReply(session, {
       reason: "mode_switch_llm",
       excludeMessageId: currentReplyMessage(session)?.id || null,
@@ -2059,8 +1980,7 @@ async function revealPrank(request, reply) {
   }
 
   stopActiveGeneration(session, "stopped");
-  stopReferenceGeneration(session);
-  session.adminDraft = null;
+  clearAdminDraft(session);
   const message = createMessage(
     "assistant",
     "我摊牌了，我可是魔丸。你以为刚才是在和大模型聊天？其实一直有人在后台手动接招。欢迎来到魔丸整蛊现场。"

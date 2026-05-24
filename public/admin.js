@@ -28,7 +28,6 @@ let currentAdmin = null;
 let adminEvents = null;
 let isRefreshing = false;
 let activeAdminDraft = null;
-let activeCanReply = false;
 
 function redirectToLogin() {
   window.location.href = "/admin-login.html";
@@ -180,6 +179,13 @@ function createSystemNotice(text) {
   return row;
 }
 
+const referenceViews = {
+  idle: ["等待生成参考", "点刷新，魔丸先给你一版底稿。"],
+  generating: ["魔丸正在憋参考稿", "正在生成，等它把这团火捏成一句能发的话。"],
+  error: ["参考稿没出来", "可以刷新再试，或者直接手写。"],
+  unavailable: ["参考稿没出来", "可以刷新再试，或者直接手写。"]
+};
+
 function renderReferencePanel(session) {
   const draft = session.adminDraft || null;
   activeAdminDraft = draft;
@@ -199,27 +205,17 @@ function renderReferencePanel(session) {
   refreshReferenceButton.disabled = !canRefresh;
   useReferenceButton.disabled = !(status === "complete" && draft?.content);
 
-  if (status === "generating") {
-    referenceMetaEl.textContent = "魔丸正在憋参考稿";
-    referenceContentEl.textContent = "正在生成，等它把这团火捏成一句能发的话。";
-  } else if (status === "complete") {
-    referenceMetaEl.textContent = `已生成 · ${formatTime(draft.updatedAt)}`;
-    referenceContentEl.textContent = draft.content;
-  } else if (status === "error" || status === "unavailable") {
-    referenceMetaEl.textContent = "参考稿没出来";
-    referenceContentEl.textContent = draft.error || "可以刷新再试，或者直接手写。";
-  } else {
-    referenceMetaEl.textContent = "等待生成参考";
-    referenceContentEl.textContent = "点刷新，魔丸先给你一版底稿。";
-  }
+  const [meta, content] = referenceViews[status] || referenceViews.idle;
+  referenceMetaEl.textContent = status === "complete" ? `已生成 · ${formatTime(draft.updatedAt)}` : meta;
+  referenceContentEl.textContent = status === "complete" ? draft.content : draft?.error || content;
 }
 
 function setComposerEnabled(enabled, canReply = false) {
-  activeCanReply = Boolean(enabled && canReply);
-  replyInput.disabled = !activeCanReply;
-  replyButton.disabled = !activeCanReply;
+  const canUseComposer = Boolean(enabled && canReply);
+  replyInput.disabled = !canUseComposer;
+  replyButton.disabled = !canUseComposer;
   quickReplyButtons.forEach((button) => {
-    button.disabled = !activeCanReply;
+    button.disabled = !canUseComposer;
   });
   revealButton.disabled = !enabled;
   llmModeButton.disabled = !enabled;
@@ -255,9 +251,7 @@ function renderActiveSession(session) {
     generating: session.isGenerating,
     replyMode,
     canReply: session.canReply,
-    draft: session.adminDraft
-      ? `${session.adminDraft.status}:${session.adminDraft.content}:${session.adminDraft.error || ""}:${session.adminDraft.updatedAt}`
-      : "",
+    draft: session.adminDraft,
     revealed: session.revealed,
     regenerate: session.regenerateRequest?.id || ""
   });
@@ -500,7 +494,7 @@ replyForm.addEventListener("submit", async (event) => {
   } catch (error) {
     activeMetaEl.textContent = error.message;
   } finally {
-    replyButton.disabled = !activeCanReply;
+    replyButton.disabled = replyInput.disabled;
   }
 });
 
@@ -549,7 +543,7 @@ llmModeButton.addEventListener("click", () => changeReplyMode("llm"));
 manualModeButton.addEventListener("click", () => changeReplyMode("manual"));
 
 useReferenceButton.addEventListener("click", () => {
-  if (!activeAdminDraft?.content || !activeCanReply) {
+  if (!activeAdminDraft?.content || replyInput.disabled) {
     return;
   }
 
