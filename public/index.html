@@ -14,7 +14,7 @@
         <div class="sidebar-top">
           <button class="new-chat-button" id="newChatButton" type="button">
             <span aria-hidden="true">+</span>
-            <span>新对话</span>
+            <span>切换代号</span>
           </button>
         </div>
 
@@ -35,8 +35,8 @@
 
         <div class="sidebar-footer">
           <div class="mini-profile">
-            <span class="mini-avatar" aria-hidden="true">A</span>
-            <span>魔丸</span>
+            <span class="mini-avatar" id="visitorAvatar" aria-hidden="true">访</span>
+            <span id="visitorProfileName">访客</span>
           </div>
         </div>
       </aside>
@@ -72,5 +72,28 @@
         </form>
       </section>
     </main>
+
+    <section class="visitor-gate" id="visitorGate" aria-label="访客代号" hidden>
+      <form class="visitor-card" id="visitorForm">
+        <div class="brand auth-brand">
+          <img src="/logo.svg" alt="" class="brand-mark">
+          <div>
+            <div class="brand-name">魔丸</div>
+            <div class="brand-subtitle">进入对话</div>
+          </div>
+        </div>
+
+        <label for="visitorIdInput">你的代号</label>
+        <input
+          id="visitorIdInput"
+          type="text"
+          autocomplete="nickname"
+          maxlength="40"
+          placeholder="比如 小王 / cql / test001"
+        >
+        <p class="auth-error" id="visitorError" hidden></p>
+        <button class="send-button visitor-submit" type="submit">进入聊天</button>
+      </form>
+    </section>
   </body>
 </html>

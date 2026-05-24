@@ -1,6 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { createHmac, randomUUID, scryptSync, timingSafeEqual } = require("node:crypto");
+const { createHash, createHmac, randomUUID, scryptSync, timingSafeEqual } = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
 const fastify = require("fastify");
 
@@ -204,6 +204,8 @@ function createDatabase() {
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
+      visitor_key TEXT,
+      visitor_label TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       last_seen_at TEXT NOT NULL,
@@ -244,7 +246,13 @@ function createDatabase() {
   database
     .prepare("UPDATE messages SET status = 'stopped', updated_at = ? WHERE status = 'streaming'")
     .run(now());
+  ensureColumn(database, "sessions", "visitor_key", "TEXT");
+  ensureColumn(database, "sessions", "visitor_label", "TEXT");
   ensureColumn(database, "sessions", "manual_next_reply", "INTEGER NOT NULL DEFAULT 0");
+  database.prepare("DELETE FROM sessions WHERE visitor_label IS NULL OR visitor_label = ''").run();
+  database
+    .prepare("DELETE FROM audit_logs WHERE session_id IS NOT NULL AND session_id NOT IN (SELECT id FROM sessions)")
+    .run();
 
   return database;
 }
@@ -274,10 +282,12 @@ const statements = {
   deleteExpiredAdminSessions: db.prepare("DELETE FROM admin_sessions WHERE expires_at <= ?"),
   upsertSession: db.prepare(`
     INSERT INTO sessions (
-      id, title, created_at, updated_at, last_seen_at, admin_typing, revealed, manual_next_reply, regenerate_request
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      id, title, visitor_key, visitor_label, created_at, updated_at, last_seen_at, admin_typing, revealed, manual_next_reply, regenerate_request
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       title = excluded.title,
+      visitor_key = excluded.visitor_key,
+      visitor_label = excluded.visitor_label,
       updated_at = excluded.updated_at,
       last_seen_at = excluded.last_seen_at,
       admin_typing = excluded.admin_typing,
@@ -383,6 +393,8 @@ function persistSession(session) {
   statements.upsertSession.run(
     session.id,
     session.title,
+    session.visitorKey || null,
+    session.visitorLabel || null,
     session.createdAt,
     session.updatedAt,
     session.lastSeenAt,
@@ -428,6 +440,8 @@ function hydrateSession(row) {
   return {
     id: row.id,
     title: row.title,
+    visitorKey: row.visitor_key || null,
+    visitorLabel: row.visitor_label || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastSeenAt: row.last_seen_at,
@@ -477,7 +491,26 @@ function isValidSessionId(id) {
   return typeof id === "string" && /^[a-zA-Z0-9_-]{8,80}$/.test(id);
 }
 
-function getSession(id) {
+function normalizeVisitorLabel(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function visitorKeyFromLabel(label) {
+  return createHash("sha256")
+    .update(`mowan-visitor-v1:${label.toLocaleLowerCase("zh-CN")}`)
+    .digest("hex")
+    .slice(0, 24);
+}
+
+function sessionIdForVisitorLabel(label) {
+  return `visitor-${visitorKeyFromLabel(label)}`;
+}
+
+function getSession(id, options = {}) {
   if (!isValidSessionId(id)) {
     return null;
   }
@@ -492,6 +525,8 @@ function getSession(id) {
       lastSeenAt: createdAt,
       adminTyping: false,
       revealed: false,
+      visitorKey: options.visitorKey || null,
+      visitorLabel: options.visitorLabel || null,
       replyMode: "llm",
       regenerateRequest: null,
       generation: null,
@@ -511,6 +546,40 @@ function getSession(id) {
   }
 
   return sessions.get(id);
+}
+
+function getVisitorSession(visitorLabel) {
+  const visitorKey = visitorKeyFromLabel(visitorLabel);
+  const sessionId = sessionIdForVisitorLabel(visitorLabel);
+  const session = getSession(sessionId, { visitorKey, visitorLabel });
+  if (!session) {
+    return null;
+  }
+
+  const timestamp = now();
+  let changed = false;
+  if (session.visitorKey !== visitorKey) {
+    session.visitorKey = visitorKey;
+    changed = true;
+  }
+  if (session.visitorLabel !== visitorLabel) {
+    session.visitorLabel = visitorLabel;
+    changed = true;
+  }
+  if (session.title !== visitorLabel) {
+    session.title = visitorLabel;
+    changed = true;
+  }
+
+  session.lastSeenAt = timestamp;
+  if (changed) {
+    session.updatedAt = timestamp;
+    persistSession(session);
+    broadcastSessionUpdate(session);
+  } else {
+    persistSession(session);
+  }
+  return session;
 }
 
 function touch(session) {
@@ -546,6 +615,7 @@ function summarizeSession(session) {
   return {
     id: session.id,
     title: session.title,
+    visitorLabel: session.visitorLabel,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     lastSeenAt: session.lastSeenAt,
@@ -577,6 +647,7 @@ function publicSession(session) {
   return {
     id: session.id,
     title: session.title,
+    visitorLabel: session.visitorLabel,
     messages: session.messages.map(serializeMessage),
     typing: awaitingReply,
     awaitingReply,
@@ -1232,6 +1303,34 @@ async function getChatSession(request, reply) {
   sendJson(reply, 200, publicSession(session));
 }
 
+async function identifyVisitor(request, reply) {
+  const body = requestBody(request);
+  const visitorLabel = normalizeVisitorLabel(body.visitorId || body.id);
+  if (!visitorLabel) {
+    sendError(reply, 400, "请输入访客代号");
+    return;
+  }
+
+  if (visitorLabel.length > 40) {
+    sendError(reply, 400, "访客代号最多 40 个字符");
+    return;
+  }
+
+  const session = getVisitorSession(visitorLabel);
+  if (!session) {
+    sendError(reply, 400, "访客代号无效");
+    return;
+  }
+
+  sendJson(reply, 200, {
+    visitor: {
+      id: visitorLabel,
+      label: visitorLabel
+    },
+    session: publicSession(session)
+  });
+}
+
 async function streamChatEvents(request, reply) {
   const session = sessionFromRequest(request, reply);
   if (!session) {
@@ -1268,7 +1367,7 @@ async function postChatMessage(request, reply) {
   const message = createMessage("user", content);
   session.messages.push(message);
   persistMessage(session, message);
-  if (session.title === newVisitorTitle) {
+  if (!session.visitorLabel && session.title === newVisitorTitle) {
     session.title = content.length > 28 ? `${content.slice(0, 28)}...` : content;
   }
   session.regenerateRequest = null;
@@ -1454,6 +1553,7 @@ function registerRoutes(app) {
   app.all("/api/admin/logout", handleAdminLogout);
   app.get("/api/admin/me", { preHandler: requireAdmin }, getCurrentAdmin);
 
+  app.post("/api/visitor/identify", identifyVisitor);
   app.get("/api/chat/:sessionId", getChatSession);
   app.get("/api/chat/:sessionId/events", streamChatEvents);
   app.post("/api/chat/:sessionId/messages", postChatMessage);

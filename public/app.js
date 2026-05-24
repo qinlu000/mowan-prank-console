@@ -1,17 +1,28 @@
 const legacyStorageKeys = ["astra" + "chat-prank-session-id"];
-const storageKey = "mowan-prank-session-id";
+const sessionStorageKey = "mowan-prank-session-id";
+const visitorStorageKey = "mowan-prank-visitor-id";
 const messagesEl = document.querySelector("#messages");
 const composer = document.querySelector("#composer");
 const input = document.querySelector("#messageInput");
+const sendButton = document.querySelector("#sendButton");
 const statusEl = document.querySelector("#connectionStatus");
 const newChatButton = document.querySelector("#newChatButton");
 const generationActions = document.querySelector("#generationActions");
 const stopButton = document.querySelector("#stopButton");
 const regenerateButton = document.querySelector("#regenerateButton");
+const visitorGate = document.querySelector("#visitorGate");
+const visitorForm = document.querySelector("#visitorForm");
+const visitorIdInput = document.querySelector("#visitorIdInput");
+const visitorError = document.querySelector("#visitorError");
+const visitorProfileName = document.querySelector("#visitorProfileName");
+const visitorAvatar = document.querySelector("#visitorAvatar");
+const suggestionButtons = [...document.querySelectorAll("[data-suggestion]")];
 
-let sessionId = getSessionId();
+let sessionId = localStorage.getItem(sessionStorageKey) || "";
+let visitorId = localStorage.getItem(visitorStorageKey) || "";
 let lastRenderSignature = "";
 let isSending = false;
+let isIdentifying = false;
 let latestSession = null;
 let eventSource = null;
 
@@ -19,28 +30,97 @@ for (const key of legacyStorageKeys) {
   localStorage.removeItem(key);
 }
 
-function getSessionId() {
-  const existing = localStorage.getItem(storageKey);
-  if (existing) {
-    return existing;
+function setChatReady(ready) {
+  input.disabled = !ready;
+  sendButton.disabled = !ready;
+  stopButton.disabled = !ready;
+  regenerateButton.disabled = !ready;
+  for (const button of suggestionButtons) {
+    button.disabled = !ready;
   }
-
-  const id =
-    crypto.randomUUID?.() ||
-    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
-  localStorage.setItem(storageKey, id);
-  return id;
 }
 
-function resetChat() {
-  localStorage.removeItem(storageKey);
-  sessionId = getSessionId();
+function updateVisitorBadge(label) {
+  const name = label || "访客";
+  visitorProfileName.textContent = name;
+  visitorAvatar.textContent = name.slice(0, 1).toUpperCase() || "访";
+}
+
+function showVisitorGate(errorMessage = "") {
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
+
+  setChatReady(false);
+  visitorGate.hidden = false;
+  visitorIdInput.value = visitorId;
+  visitorError.hidden = !errorMessage;
+  visitorError.textContent = errorMessage;
+  statusEl.textContent = "等待代号";
+  messagesEl.replaceChildren();
+  latestSession = null;
+  lastRenderSignature = "";
+  setTimeout(() => visitorIdInput.focus(), 0);
+}
+
+function hideVisitorGate() {
+  visitorGate.hidden = true;
+  visitorError.hidden = true;
+}
+
+function switchVisitor() {
+  isIdentifying = false;
+  localStorage.removeItem(visitorStorageKey);
+  localStorage.removeItem(sessionStorageKey);
+  visitorId = "";
+  sessionId = "";
   latestSession = null;
   lastRenderSignature = "";
   input.value = "";
   input.style.height = "auto";
-  connectEventStream();
-  fetchState();
+  updateVisitorBadge("");
+  showVisitorGate();
+}
+
+async function identifyVisitor(nextVisitorId) {
+  const normalizedVisitorId = nextVisitorId.trim();
+  if (!normalizedVisitorId) {
+    showVisitorGate("请输入访客代号");
+    return;
+  }
+
+  isIdentifying = true;
+  statusEl.textContent = "正在进入";
+  setChatReady(false);
+  try {
+    const response = await fetch("/api/visitor/identify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ visitorId: normalizedVisitorId })
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "进入失败");
+    }
+
+    visitorId = payload.visitor?.label || normalizedVisitorId;
+    sessionId = payload.session.id;
+    localStorage.setItem(visitorStorageKey, visitorId);
+    localStorage.setItem(sessionStorageKey, sessionId);
+    updateVisitorBadge(visitorId);
+    hideVisitorGate();
+    setChatReady(true);
+    input.value = "";
+    input.style.height = "auto";
+    render(payload.session);
+    connectEventStream();
+    input.focus();
+  } catch (error) {
+    showVisitorGate(error.message);
+  } finally {
+    isIdentifying = false;
+  }
 }
 
 function formatTime(value) {
@@ -132,6 +212,11 @@ function render(session) {
 }
 
 async function fetchState() {
+  if (!sessionId) {
+    showVisitorGate();
+    return;
+  }
+
   try {
     const response = await fetch(`/api/chat/${encodeURIComponent(sessionId)}`);
     const session = await response.json();
@@ -146,6 +231,10 @@ async function fetchState() {
 }
 
 function connectEventStream() {
+  if (!sessionId) {
+    return;
+  }
+
   if (!window.EventSource) {
     return;
   }
@@ -171,12 +260,21 @@ function connectEventStream() {
 }
 
 function fallbackRefresh() {
+  if (!sessionId || !visitorGate.hidden || isIdentifying) {
+    return;
+  }
+
   if (!window.EventSource || !eventSource || eventSource.readyState !== EventSource.OPEN) {
     fetchState();
   }
 }
 
 async function sendMessage(content) {
+  if (!sessionId) {
+    showVisitorGate();
+    return;
+  }
+
   if (isSending) {
     return;
   }
@@ -203,7 +301,7 @@ async function sendMessage(content) {
 }
 
 async function stopGeneration() {
-  if (!latestSession?.isGenerating) {
+  if (!sessionId || !latestSession?.isGenerating) {
     return;
   }
 
@@ -219,7 +317,7 @@ async function stopGeneration() {
 }
 
 async function regenerateReply() {
-  if (!latestSession?.canRegenerate || latestSession?.isGenerating) {
+  if (!sessionId || !latestSession?.canRegenerate || latestSession?.isGenerating) {
     return;
   }
 
@@ -262,7 +360,7 @@ input.addEventListener("keydown", (event) => {
   }
 });
 
-document.querySelectorAll("[data-suggestion]").forEach((button) => {
+suggestionButtons.forEach((button) => {
   button.addEventListener("click", () => {
     input.value = button.dataset.suggestion;
     autosizeInput();
@@ -270,10 +368,21 @@ document.querySelectorAll("[data-suggestion]").forEach((button) => {
   });
 });
 
-newChatButton.addEventListener("click", resetChat);
+visitorForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  visitorError.hidden = true;
+  identifyVisitor(visitorIdInput.value);
+});
+
+newChatButton.addEventListener("click", switchVisitor);
 stopButton.addEventListener("click", stopGeneration);
 regenerateButton.addEventListener("click", regenerateReply);
 
-fetchState();
-connectEventStream();
+updateVisitorBadge(visitorId);
+setChatReady(false);
+if (visitorId) {
+  identifyVisitor(visitorId);
+} else {
+  showVisitorGate();
+}
 setInterval(fallbackRefresh, 5000);

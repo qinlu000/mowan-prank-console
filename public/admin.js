@@ -149,7 +149,7 @@ function renderSessionList() {
   sessionListEl.replaceChildren(...items);
 }
 
-function createMessageRow(message) {
+function createMessageRow(message, session) {
   const row = document.createElement("article");
   row.className = `message-row ${message.role}`;
   row.dataset.status = message.status || "complete";
@@ -159,7 +159,7 @@ function createMessageRow(message) {
 
   const meta = document.createElement("div");
   meta.className = "message-meta";
-  meta.textContent = `${message.role === "user" ? "访客" : "魔丸"} · ${formatTime(message.createdAt)}`;
+  meta.textContent = `${message.role === "user" ? session.visitorLabel || "访客" : "魔丸"} · ${formatTime(message.createdAt)}`;
 
   const content = document.createElement("div");
   content.className = "message-content";
@@ -244,7 +244,7 @@ function renderActiveSession(session) {
   const shouldStickToBottom =
     adminMessagesEl.scrollHeight - adminMessagesEl.scrollTop - adminMessagesEl.clientHeight < 180;
 
-  const rows = session.messages.map(createMessageRow);
+  const rows = session.messages.map((message) => createMessageRow(message, session));
   if (session.regenerateRequest) {
     rows.push(createSystemNotice("访客点击了重新生成。你可以基于同一个问题再发一版更像 AI 的回复。"));
   } else if (replyMode === "manual" && !session.adminTyping) {
