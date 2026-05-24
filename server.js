@@ -1250,9 +1250,14 @@ function startLlmReply(session, options = {}) {
 }
 
 function sessionFromRequest(request, reply) {
-  const session = getSession(request.params.sessionId);
-  if (!session) {
+  if (!isValidSessionId(request.params.sessionId)) {
     sendError(reply, 400, "会话 ID 无效");
+    return null;
+  }
+
+  const session = sessions.get(request.params.sessionId);
+  if (!session) {
+    sendError(reply, 404, "请先输入访客代号");
     return null;
   }
   return session;
