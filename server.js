@@ -1,6 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { randomUUID, scryptSync, timingSafeEqual } = require("node:crypto");
+const { createHmac, randomUUID, scryptSync, timingSafeEqual } = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
 const fastify = require("fastify");
 
@@ -13,6 +13,8 @@ const config = {
   port: Number(process.env.PORT || 5173),
   publicDir: path.resolve(__dirname, "public"),
   adminCookieName: "mowan_admin",
+  cookieSecret: process.env.COOKIE_SECRET || randomUUID(),
+  generatedCookieSecret: !process.env.COOKIE_SECRET,
   adminUsername: process.env.ADMIN_USERNAME || process.env.FIRST_ADMIN_USERNAME || "admin",
   adminPassword: configuredAdminPassword,
   adminUsers: process.env.ADMIN_USERS || "",
@@ -91,6 +93,29 @@ function verifyPassword(password, storedHash) {
   const actual = scryptSync(String(password), salt, 32);
   const expected = Buffer.from(expectedHash, "hex");
   return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function signCookieValue(value) {
+  return createHmac("sha256", config.cookieSecret).update(String(value)).digest("hex");
+}
+
+function createSignedCookieValue(value) {
+  return `${value}.${signCookieValue(value)}`;
+}
+
+function verifySignedCookieValue(value) {
+  const [token, signature] = String(value || "").split(".");
+  if (!token || !signature) {
+    return null;
+  }
+
+  const expected = Buffer.from(signCookieValue(token));
+  const actual = Buffer.from(signature);
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+    return null;
+  }
+
+  return token;
 }
 
 function createDatabase() {
@@ -602,8 +627,13 @@ function parseCookies(request) {
   return cookies;
 }
 
+function getAdminCookieToken(request) {
+  const value = parseCookies(request).get(config.adminCookieName);
+  return verifySignedCookieValue(value);
+}
+
 function getAuthenticatedAdmin(request) {
-  const token = parseCookies(request).get(config.adminCookieName);
+  const token = getAdminCookieToken(request);
   if (!token) {
     return null;
   }
@@ -637,9 +667,10 @@ async function requireAdmin(request, reply) {
 }
 
 function setAdminCookie(reply, token) {
+  const cookieValue = createSignedCookieValue(token);
   reply.header(
     "Set-Cookie",
-    `${config.adminCookieName}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`
+    `${config.adminCookieName}=${encodeURIComponent(cookieValue)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`
   );
 }
 
@@ -865,7 +896,7 @@ async function handleAdminLogin(request, reply) {
 }
 
 async function handleAdminLogout(request, reply) {
-  const token = parseCookies(request).get(config.adminCookieName);
+  const token = getAdminCookieToken(request);
   const admin = getAuthenticatedAdmin(request);
   if (token) {
     statements.deleteAdminSession.run(token);
@@ -1170,6 +1201,9 @@ async function start() {
     if (config.generatedAdminPassword) {
       console.log(`Generated admin account: ${config.adminUsername}`);
       console.log(`Generated admin password: ${config.adminPassword}`);
+    }
+    if (config.generatedCookieSecret) {
+      console.log("Generated temporary cookie secret. Set COOKIE_SECRET for persistent admin logins.");
     }
   } catch (error) {
     app.log.error(error);

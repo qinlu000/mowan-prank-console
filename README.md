@@ -83,7 +83,7 @@ pnpm run dev
 
 ## Docker 部署
 
-复制 `.env.example` 为 `.env`，至少设置 `DOMAIN`、`ADMIN_USERS` 和 `COOKIE_SECRET`，然后在 VPS 上运行：
+复制 `.env.production.example` 为 `.env`，至少设置 `DOMAIN`、`ADMIN_USERS` 和 `COOKIE_SECRET`，然后在 VPS 上运行：
 
 ```bash
 docker compose up -d --build
@@ -98,6 +98,8 @@ sh scripts/verify-deploy.sh
 ```
 
 它会验证健康检查、访客到后台回复、容器重启持久化，以及 SQLite 备份恢复。
+
+上线时按 [docs/LAUNCH-CHECKLIST.md](docs/LAUNCH-CHECKLIST.md) 走一遍，避免漏掉域名、端口、备份恢复这些关键点。
 
 ## 内网穿透
 

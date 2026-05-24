@@ -21,7 +21,13 @@ pnpm install
 
 服务器需要安装 Docker 和 Docker Compose。建议先把域名解析到 VPS 公网 IP，并开放 80/443 端口。
 
-在服务器上创建 `.env`：
+在服务器上创建 `.env`。推荐从生产模板复制：
+
+```bash
+cp .env.production.example .env
+```
+
+`.env` 至少要包含：
 
 ```env
 DOMAIN=mowan.example.com
@@ -29,6 +35,8 @@ ADMIN_USERS=admin:change-this-admin-password,friend:change-this-friend-password
 COOKIE_SECRET=change-this-cookie-secret
 SESSION_RETENTION_DAYS=7
 ```
+
+`COOKIE_SECRET` 用来给后台登录 cookie 加签。正式部署时必须固定下来，不要每次启动都换，否则已有后台登录会失效。
 
 然后启动：
 
