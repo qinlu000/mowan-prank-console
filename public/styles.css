@@ -333,10 +333,28 @@ input:focus {
   text-align: left;
 }
 
-.conversation-item span:last-child {
+.conversation-copy,
+.conversation-title,
+.conversation-preview {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.conversation-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.conversation-title {
+  color: var(--text);
+  font-weight: 560;
+}
+
+.conversation-preview {
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 
 .conversation-item.active {

@@ -7,6 +7,8 @@ const input = document.querySelector("#messageInput");
 const sendButton = document.querySelector("#sendButton");
 const statusEl = document.querySelector("#connectionStatus");
 const newChatButton = document.querySelector("#newChatButton");
+const newChatLabel = document.querySelector("#newChatLabel");
+const conversationNav = document.querySelector("#conversationNav");
 const generationActions = document.querySelector("#generationActions");
 const stopButton = document.querySelector("#stopButton");
 const regenerateButton = document.querySelector("#regenerateButton");
@@ -20,6 +22,8 @@ const suggestionButtons = [...document.querySelectorAll("[data-suggestion]")];
 
 let sessionId = localStorage.getItem(sessionStorageKey) || "";
 let visitorId = localStorage.getItem(visitorStorageKey) || "";
+let visitorSessions = [];
+let maxConversations = 3;
 let lastRenderSignature = "";
 let isSending = false;
 let isIdentifying = false;
@@ -33,11 +37,78 @@ for (const key of legacyStorageKeys) {
 function setChatReady(ready) {
   input.disabled = !ready;
   sendButton.disabled = !ready;
+  newChatButton.disabled = !ready || visitorSessions.length >= maxConversations;
   stopButton.disabled = !ready;
   regenerateButton.disabled = !ready;
   for (const button of suggestionButtons) {
     button.disabled = !ready;
   }
+}
+
+function conversationPreview(session) {
+  if (!session?.lastMessage) {
+    return "新的对话";
+  }
+
+  const prefix = session.lastMessage.role === "user" ? "你：" : "魔丸：";
+  return `${prefix}${session.lastMessage.content}`;
+}
+
+function relativeTime(value) {
+  const seconds = Math.max(1, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
+  if (seconds < 60) {
+    return "刚刚";
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes} 分钟前`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours} 小时前`;
+  }
+  return `${Math.floor(hours / 24)} 天前`;
+}
+
+function renderConversationNav() {
+  const canCreate = Boolean(visitorId) && visitorSessions.length < maxConversations;
+  newChatButton.disabled = !canCreate;
+  newChatLabel.textContent = canCreate
+    ? `新对话 (${visitorSessions.length}/${maxConversations})`
+    : `已达 ${maxConversations} 个对话`;
+
+  if (!visitorId) {
+    conversationNav.replaceChildren();
+    return;
+  }
+
+  const items = visitorSessions.map((session) => {
+    const button = document.createElement("button");
+    button.className = `conversation-item${session.id === sessionId ? " active" : ""}`;
+    button.type = "button";
+    button.addEventListener("click", () => selectConversation(session.id));
+
+    const dot = document.createElement("span");
+    dot.className = "conversation-dot";
+    dot.setAttribute("aria-hidden", "true");
+
+    const content = document.createElement("span");
+    content.className = "conversation-copy";
+
+    const title = document.createElement("span");
+    title.className = "conversation-title";
+    title.textContent = `对话 ${session.conversationIndex || 1}`;
+
+    const preview = document.createElement("span");
+    preview.className = "conversation-preview";
+    preview.textContent = `${conversationPreview(session)} · ${relativeTime(session.updatedAt)}`;
+
+    content.append(title, preview);
+    button.append(dot, content);
+    return button;
+  });
+
+  conversationNav.replaceChildren(...items);
 }
 
 function updateVisitorBadge(label) {
@@ -61,6 +132,8 @@ function showVisitorGate(errorMessage = "") {
   messagesEl.replaceChildren();
   latestSession = null;
   lastRenderSignature = "";
+  visitorSessions = [];
+  renderConversationNav();
   setTimeout(() => visitorIdInput.focus(), 0);
 }
 
@@ -69,18 +142,15 @@ function hideVisitorGate() {
   visitorError.hidden = true;
 }
 
-function switchVisitor() {
-  isIdentifying = false;
-  localStorage.removeItem(visitorStorageKey);
-  localStorage.removeItem(sessionStorageKey);
-  visitorId = "";
-  sessionId = "";
-  latestSession = null;
-  lastRenderSignature = "";
-  input.value = "";
-  input.style.height = "auto";
-  updateVisitorBadge("");
-  showVisitorGate();
+function applyVisitorPayload(payload) {
+  visitorId = payload.visitor?.label || visitorId;
+  sessionId = payload.session.id;
+  visitorSessions = payload.sessions || [];
+  maxConversations = payload.maxConversations || maxConversations;
+  localStorage.setItem(visitorStorageKey, visitorId);
+  localStorage.setItem(sessionStorageKey, sessionId);
+  updateVisitorBadge(visitorId);
+  renderConversationNav();
 }
 
 async function identifyVisitor(nextVisitorId) {
@@ -97,18 +167,14 @@ async function identifyVisitor(nextVisitorId) {
     const response = await fetch("/api/visitor/identify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ visitorId: normalizedVisitorId })
+      body: JSON.stringify({ visitorId: normalizedVisitorId, sessionId })
     });
     const payload = await response.json();
     if (!response.ok) {
       throw new Error(payload.error || "进入失败");
     }
 
-    visitorId = payload.visitor?.label || normalizedVisitorId;
-    sessionId = payload.session.id;
-    localStorage.setItem(visitorStorageKey, visitorId);
-    localStorage.setItem(sessionStorageKey, sessionId);
-    updateVisitorBadge(visitorId);
+    applyVisitorPayload(payload);
     hideVisitorGate();
     setChatReady(true);
     input.value = "";
@@ -121,6 +187,51 @@ async function identifyVisitor(nextVisitorId) {
   } finally {
     isIdentifying = false;
   }
+}
+
+async function createConversation() {
+  if (!visitorId || visitorSessions.length >= maxConversations) {
+    return;
+  }
+
+  newChatButton.disabled = true;
+  statusEl.textContent = "正在创建";
+  try {
+    const response = await fetch("/api/visitor/conversations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ visitorId })
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "创建对话失败");
+    }
+
+    applyVisitorPayload(payload);
+    lastRenderSignature = "";
+    input.value = "";
+    input.style.height = "auto";
+    render(payload.session);
+    connectEventStream();
+    input.focus();
+  } catch (error) {
+    statusEl.textContent = error.message;
+  } finally {
+    setChatReady(Boolean(sessionId));
+  }
+}
+
+function selectConversation(nextSessionId) {
+  if (!nextSessionId || nextSessionId === sessionId) {
+    return;
+  }
+
+  sessionId = nextSessionId;
+  localStorage.setItem(sessionStorageKey, sessionId);
+  lastRenderSignature = "";
+  renderConversationNav();
+  connectEventStream();
+  fetchState();
 }
 
 function formatTime(value) {
@@ -185,8 +296,24 @@ function renderControls(session) {
 function render(session) {
   latestSession = session;
   renderControls(session);
+  const lastMessage = session.messages[session.messages.length - 1] || null;
+  const summary = {
+    id: session.id,
+    title: session.title,
+    visitorLabel: session.visitorLabel,
+    conversationIndex: session.conversationIndex,
+    updatedAt: lastMessage?.updatedAt || lastMessage?.createdAt || new Date().toISOString(),
+    messageCount: session.messages.length,
+    lastMessage
+  };
+  const existingIndex = visitorSessions.findIndex((item) => item.id === session.id);
+  if (existingIndex >= 0) {
+    visitorSessions[existingIndex] = { ...visitorSessions[existingIndex], ...summary };
+  }
+  renderConversationNav();
 
   const signature = JSON.stringify({
+    id: session.id,
     ids: session.messages.map((message) => `${message.id}:${message.content}:${message.status}`),
     typing: session.typing,
     isGenerating: session.isGenerating,
@@ -221,6 +348,12 @@ async function fetchState() {
     const response = await fetch(`/api/chat/${encodeURIComponent(sessionId)}`);
     const session = await response.json();
     if (!response.ok) {
+      if (response.status === 404 && visitorId) {
+        localStorage.removeItem(sessionStorageKey);
+        sessionId = "";
+        identifyVisitor(visitorId);
+        return;
+      }
       throw new Error(session.error || "连接失败");
     }
 
@@ -374,7 +507,7 @@ visitorForm.addEventListener("submit", (event) => {
   identifyVisitor(visitorIdInput.value);
 });
 
-newChatButton.addEventListener("click", switchVisitor);
+newChatButton.addEventListener("click", createConversation);
 stopButton.addEventListener("click", stopGeneration);
 regenerateButton.addEventListener("click", regenerateReply);
 

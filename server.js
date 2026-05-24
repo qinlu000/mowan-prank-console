@@ -15,6 +15,7 @@ const config = {
   port: Number(process.env.PORT || 5173),
   publicDir: path.resolve(__dirname, "public"),
   adminCookieName: "mowan_admin",
+  visitorCookieName: "mowan_visitor_device",
   cookieSecret: process.env.COOKIE_SECRET || randomUUID(),
   generatedCookieSecret: !process.env.COOKIE_SECRET,
   adminUsername: process.env.ADMIN_USERNAME || process.env.FIRST_ADMIN_USERNAME || "admin",
@@ -39,6 +40,7 @@ const config = {
 };
 
 const newVisitorTitle = "新访客";
+const maxVisitorConversations = 3;
 const sessions = new Map();
 const sseClients = new Set();
 
@@ -206,6 +208,7 @@ function createDatabase() {
       title TEXT NOT NULL,
       visitor_key TEXT,
       visitor_label TEXT,
+      conversation_index INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       last_seen_at TEXT NOT NULL,
@@ -214,6 +217,17 @@ function createDatabase() {
       manual_next_reply INTEGER NOT NULL DEFAULT 0,
       regenerate_request TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS visitor_devices (
+      token TEXT PRIMARY KEY,
+      visitor_key TEXT NOT NULL,
+      visitor_label TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_visitor_devices_visitor_key
+      ON visitor_devices(visitor_key);
 
     CREATE TABLE IF NOT EXISTS messages (
       id TEXT PRIMARY KEY,
@@ -248,11 +262,18 @@ function createDatabase() {
     .run(now());
   ensureColumn(database, "sessions", "visitor_key", "TEXT");
   ensureColumn(database, "sessions", "visitor_label", "TEXT");
+  ensureColumn(database, "sessions", "conversation_index", "INTEGER NOT NULL DEFAULT 1");
   ensureColumn(database, "sessions", "manual_next_reply", "INTEGER NOT NULL DEFAULT 0");
+  database.prepare("UPDATE sessions SET conversation_index = 1 WHERE conversation_index IS NULL").run();
   database.prepare("DELETE FROM sessions WHERE visitor_label IS NULL OR visitor_label = ''").run();
   database
     .prepare("DELETE FROM audit_logs WHERE session_id IS NOT NULL AND session_id NOT IN (SELECT id FROM sessions)")
     .run();
+  database.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_visitor_conversation
+      ON sessions(visitor_key, conversation_index)
+      WHERE visitor_key IS NOT NULL;
+  `);
 
   return database;
 }
@@ -282,12 +303,13 @@ const statements = {
   deleteExpiredAdminSessions: db.prepare("DELETE FROM admin_sessions WHERE expires_at <= ?"),
   upsertSession: db.prepare(`
     INSERT INTO sessions (
-      id, title, visitor_key, visitor_label, created_at, updated_at, last_seen_at, admin_typing, revealed, manual_next_reply, regenerate_request
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      id, title, visitor_key, visitor_label, conversation_index, created_at, updated_at, last_seen_at, admin_typing, revealed, manual_next_reply, regenerate_request
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       title = excluded.title,
       visitor_key = excluded.visitor_key,
       visitor_label = excluded.visitor_label,
+      conversation_index = excluded.conversation_index,
       updated_at = excluded.updated_at,
       last_seen_at = excluded.last_seen_at,
       admin_typing = excluded.admin_typing,
@@ -308,6 +330,15 @@ const statements = {
   selectSessions: db.prepare("SELECT * FROM sessions ORDER BY updated_at DESC"),
   selectMessages: db.prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY position ASC"),
   deleteExpiredSessions: db.prepare("DELETE FROM sessions WHERE updated_at < ?"),
+  selectVisitorDevice: db.prepare("SELECT * FROM visitor_devices WHERE token = ?"),
+  upsertVisitorDevice: db.prepare(`
+    INSERT INTO visitor_devices (token, visitor_key, visitor_label, created_at, last_seen_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(token) DO UPDATE SET
+      visitor_key = excluded.visitor_key,
+      visitor_label = excluded.visitor_label,
+      last_seen_at = excluded.last_seen_at
+  `),
   selectLatestAuditLogBySession: db.prepare(`
     SELECT * FROM audit_logs WHERE session_id = ? ORDER BY created_at DESC LIMIT 1
   `),
@@ -395,6 +426,7 @@ function persistSession(session) {
     session.title,
     session.visitorKey || null,
     session.visitorLabel || null,
+    session.conversationIndex || 1,
     session.createdAt,
     session.updatedAt,
     session.lastSeenAt,
@@ -442,6 +474,7 @@ function hydrateSession(row) {
     title: row.title,
     visitorKey: row.visitor_key || null,
     visitorLabel: row.visitor_label || null,
+    conversationIndex: row.conversation_index || 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastSeenAt: row.last_seen_at,
@@ -506,8 +539,12 @@ function visitorKeyFromLabel(label) {
     .slice(0, 24);
 }
 
-function sessionIdForVisitorLabel(label) {
-  return `visitor-${visitorKeyFromLabel(label)}`;
+function visitorConversationTitle(visitorLabel, conversationIndex) {
+  return `${visitorLabel} · 对话 ${conversationIndex}`;
+}
+
+function sessionIdForVisitorKey(visitorKey, conversationIndex = 1) {
+  return conversationIndex === 1 ? `visitor-${visitorKey}` : `visitor-${visitorKey}-${conversationIndex}`;
 }
 
 function getSession(id, options = {}) {
@@ -519,7 +556,7 @@ function getSession(id, options = {}) {
     const createdAt = now();
     sessions.set(id, {
       id,
-      title: newVisitorTitle,
+      title: options.title || newVisitorTitle,
       createdAt,
       updatedAt: createdAt,
       lastSeenAt: createdAt,
@@ -527,6 +564,7 @@ function getSession(id, options = {}) {
       revealed: false,
       visitorKey: options.visitorKey || null,
       visitorLabel: options.visitorLabel || null,
+      conversationIndex: options.conversationIndex || 1,
       replyMode: "llm",
       regenerateRequest: null,
       generation: null,
@@ -548,10 +586,25 @@ function getSession(id, options = {}) {
   return sessions.get(id);
 }
 
-function getVisitorSession(visitorLabel) {
+function getVisitorSessions(visitorKey) {
+  return [...sessions.values()]
+    .filter((session) => session.visitorKey === visitorKey)
+    .sort((first, second) => {
+      const byIndex = (first.conversationIndex || 1) - (second.conversationIndex || 1);
+      return byIndex || first.createdAt.localeCompare(second.createdAt);
+    });
+}
+
+function getVisitorConversation(visitorLabel, conversationIndex = 1) {
   const visitorKey = visitorKeyFromLabel(visitorLabel);
-  const sessionId = sessionIdForVisitorLabel(visitorLabel);
-  const session = getSession(sessionId, { visitorKey, visitorLabel });
+  const sessionId = sessionIdForVisitorKey(visitorKey, conversationIndex);
+  const title = visitorConversationTitle(visitorLabel, conversationIndex);
+  const session = getSession(sessionId, {
+    title,
+    visitorKey,
+    visitorLabel,
+    conversationIndex
+  });
   if (!session) {
     return null;
   }
@@ -566,8 +619,12 @@ function getVisitorSession(visitorLabel) {
     session.visitorLabel = visitorLabel;
     changed = true;
   }
-  if (session.title !== visitorLabel) {
-    session.title = visitorLabel;
+  if (session.conversationIndex !== conversationIndex) {
+    session.conversationIndex = conversationIndex;
+    changed = true;
+  }
+  if (session.title !== title) {
+    session.title = title;
     changed = true;
   }
 
@@ -580,6 +637,33 @@ function getVisitorSession(visitorLabel) {
     persistSession(session);
   }
   return session;
+}
+
+function ensureFirstVisitorConversation(visitorLabel) {
+  const visitorKey = visitorKeyFromLabel(visitorLabel);
+  const existing = getVisitorSessions(visitorKey);
+  return existing[0]
+    ? getVisitorConversation(visitorLabel, existing[0].conversationIndex || 1)
+    : getVisitorConversation(visitorLabel, 1);
+}
+
+function createVisitorConversation(visitorLabel) {
+  const visitorKey = visitorKeyFromLabel(visitorLabel);
+  const existing = getVisitorSessions(visitorKey);
+  if (existing.length >= maxVisitorConversations) {
+    return null;
+  }
+
+  const usedIndexes = new Set(existing.map((session) => session.conversationIndex || 1));
+  let conversationIndex = 1;
+  while (usedIndexes.has(conversationIndex) && conversationIndex <= maxVisitorConversations) {
+    conversationIndex += 1;
+  }
+  if (conversationIndex > maxVisitorConversations) {
+    return null;
+  }
+
+  return getVisitorConversation(visitorLabel, conversationIndex);
 }
 
 function touch(session) {
@@ -616,6 +700,7 @@ function summarizeSession(session) {
     id: session.id,
     title: session.title,
     visitorLabel: session.visitorLabel,
+    conversationIndex: session.conversationIndex || 1,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     lastSeenAt: session.lastSeenAt,
@@ -648,6 +733,7 @@ function publicSession(session) {
     id: session.id,
     title: session.title,
     visitorLabel: session.visitorLabel,
+    conversationIndex: session.conversationIndex || 1,
     messages: session.messages.map(serializeMessage),
     typing: awaitingReply,
     awaitingReply,
@@ -655,6 +741,39 @@ function publicSession(session) {
     replyMode: session.replyMode || "llm",
     canRegenerate: canRegenerate(session),
     revealed: session.revealed
+  };
+}
+
+function publicConversationSummary(session) {
+  const last = session.messages[session.messages.length - 1];
+  return {
+    id: session.id,
+    title: session.title,
+    visitorLabel: session.visitorLabel,
+    conversationIndex: session.conversationIndex || 1,
+    updatedAt: session.updatedAt,
+    messageCount: session.messages.length,
+    lastMessage: last
+      ? {
+          role: last.role,
+          content: last.content,
+          createdAt: last.createdAt,
+          status: last.status || "complete"
+        }
+      : null
+  };
+}
+
+function publicVisitorState(visitorLabel, activeSession) {
+  const visitorKey = visitorKeyFromLabel(visitorLabel);
+  return {
+    visitor: {
+      id: visitorLabel,
+      label: visitorLabel
+    },
+    maxConversations: maxVisitorConversations,
+    sessions: getVisitorSessions(visitorKey).map(publicConversationSummary),
+    session: publicSession(activeSession)
   };
 }
 
@@ -771,6 +890,11 @@ function getAdminCookieToken(request) {
   return verifySignedCookieValue(value);
 }
 
+function getVisitorDeviceToken(request) {
+  const value = parseCookies(request).get(config.visitorCookieName);
+  return verifySignedCookieValue(value);
+}
+
 function getAuthenticatedAdmin(request) {
   const token = getAdminCookieToken(request);
   if (!token) {
@@ -810,6 +934,14 @@ function setAdminCookie(reply, token) {
   reply.header(
     "Set-Cookie",
     `${config.adminCookieName}=${encodeURIComponent(cookieValue)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`
+  );
+}
+
+function setVisitorDeviceCookie(reply, token) {
+  const cookieValue = createSignedCookieValue(token);
+  reply.header(
+    "Set-Cookie",
+    `${config.visitorCookieName}=${encodeURIComponent(cookieValue)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=15552000`
   );
 }
 
@@ -1308,6 +1440,30 @@ async function getChatSession(request, reply) {
   sendJson(reply, 200, publicSession(session));
 }
 
+function bindVisitorDevice(request, reply, visitorLabel) {
+  const visitorKey = visitorKeyFromLabel(visitorLabel);
+  const timestamp = now();
+  let token = getVisitorDeviceToken(request);
+  let existingDevice = token ? statements.selectVisitorDevice.get(token) : null;
+
+  if (existingDevice && existingDevice.visitor_key !== visitorKey) {
+    return {
+      ok: false,
+      status: 409,
+      error: `此浏览器已绑定代号「${existingDevice.visitor_label}」，不能切换。`,
+      visitorLabel: existingDevice.visitor_label
+    };
+  }
+
+  if (!token || !existingDevice) {
+    token = randomUUID();
+  }
+
+  statements.upsertVisitorDevice.run(token, visitorKey, visitorLabel, timestamp, timestamp);
+  setVisitorDeviceCookie(reply, token);
+  return { ok: true, visitorKey, token };
+}
+
 async function identifyVisitor(request, reply) {
   const body = requestBody(request);
   const visitorLabel = normalizeVisitorLabel(body.visitorId || body.id);
@@ -1321,19 +1477,61 @@ async function identifyVisitor(request, reply) {
     return;
   }
 
-  const session = getVisitorSession(visitorLabel);
-  if (!session) {
+  const device = bindVisitorDevice(request, reply, visitorLabel);
+  if (!device.ok) {
+    sendJson(reply, device.status, {
+      error: device.error,
+      visitor: { label: device.visitorLabel }
+    });
+    return;
+  }
+
+  const firstSession = ensureFirstVisitorConversation(visitorLabel);
+  if (!firstSession) {
     sendError(reply, 400, "访客代号无效");
     return;
   }
 
-  sendJson(reply, 200, {
-    visitor: {
-      id: visitorLabel,
-      label: visitorLabel
-    },
-    session: publicSession(session)
-  });
+  const requestedSessionId = String(body.sessionId || "").trim();
+  const requestedSession = requestedSessionId ? sessions.get(requestedSessionId) : null;
+  const visitorSessions = getVisitorSessions(device.visitorKey);
+  const activeSession =
+    requestedSession && requestedSession.visitorKey === device.visitorKey
+      ? requestedSession
+      : visitorSessions[visitorSessions.length - 1] || firstSession;
+
+  sendJson(reply, 200, publicVisitorState(visitorLabel, activeSession));
+}
+
+async function createVisitorConversationRoute(request, reply) {
+  const body = requestBody(request);
+  const visitorLabel = normalizeVisitorLabel(body.visitorId || body.id);
+  if (!visitorLabel) {
+    sendError(reply, 400, "请输入访客代号");
+    return;
+  }
+
+  if (visitorLabel.length > 40) {
+    sendError(reply, 400, "访客代号最多 40 个字符");
+    return;
+  }
+
+  const device = bindVisitorDevice(request, reply, visitorLabel);
+  if (!device.ok) {
+    sendJson(reply, device.status, {
+      error: device.error,
+      visitor: { label: device.visitorLabel }
+    });
+    return;
+  }
+
+  const session = createVisitorConversation(visitorLabel);
+  if (!session) {
+    sendError(reply, 409, `一个代号最多只能创建 ${maxVisitorConversations} 个对话`);
+    return;
+  }
+
+  sendJson(reply, 201, publicVisitorState(visitorLabel, session));
 }
 
 async function streamChatEvents(request, reply) {
@@ -1559,6 +1757,7 @@ function registerRoutes(app) {
   app.get("/api/admin/me", { preHandler: requireAdmin }, getCurrentAdmin);
 
   app.post("/api/visitor/identify", identifyVisitor);
+  app.post("/api/visitor/conversations", createVisitorConversationRoute);
   app.get("/api/chat/:sessionId", getChatSession);
   app.get("/api/chat/:sessionId/events", streamChatEvents);
   app.post("/api/chat/:sessionId/messages", postChatMessage);

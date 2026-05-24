@@ -14,24 +14,11 @@
         <div class="sidebar-top">
           <button class="new-chat-button" id="newChatButton" type="button">
             <span aria-hidden="true">+</span>
-            <span>切换代号</span>
+            <span id="newChatLabel">新对话</span>
           </button>
         </div>
 
-        <nav class="conversation-nav" aria-label="最近对话">
-          <button class="conversation-item active" type="button">
-            <span class="conversation-dot" aria-hidden="true"></span>
-            <span>当前对话</span>
-          </button>
-          <button class="conversation-item" type="button">
-            <span class="conversation-dot" aria-hidden="true"></span>
-            <span>创意问题</span>
-          </button>
-          <button class="conversation-item" type="button">
-            <span class="conversation-dot" aria-hidden="true"></span>
-            <span>日常助手</span>
-          </button>
-        </nav>
+        <nav class="conversation-nav" id="conversationNav" aria-label="最近对话"></nav>
 
         <div class="sidebar-footer">
           <div class="mini-profile">

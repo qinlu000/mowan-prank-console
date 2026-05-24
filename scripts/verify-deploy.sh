@@ -99,6 +99,36 @@ post_json() {
   fi
 }
 
+extract_session_id() {
+  sed -n 's/.*"session":{"id":"\([^"]*\)".*/\1/p'
+}
+
+identify_visitor() {
+  visitor_id="$1"
+  identify_body="$(printf '{"visitorId":"%s"}' "$(json_escape "$visitor_id")")"
+  identify_response="$(curl -fsS -H "Content-Type: application/json" -X POST --data "$identify_body" "$BASE_URL/api/visitor/identify")"
+  session_id="$(printf "%s" "$identify_response" | extract_session_id)"
+  if [ "$session_id" = "" ]; then
+    echo "Could not extract session id from identify response:" >&2
+    printf "%s\n" "$identify_response" >&2
+    exit 1
+  fi
+  printf "%s" "$session_id"
+}
+
+create_visitor_conversation() {
+  visitor_id="$1"
+  create_body="$(printf '{"visitorId":"%s"}' "$(json_escape "$visitor_id")")"
+  create_response="$(curl -fsS -H "Content-Type: application/json" -X POST --data "$create_body" "$BASE_URL/api/visitor/conversations")"
+  session_id="$(printf "%s" "$create_response" | extract_session_id)"
+  if [ "$session_id" = "" ]; then
+    echo "Could not extract session id from create conversation response:" >&2
+    printf "%s\n" "$create_response" >&2
+    exit 1
+  fi
+  printf "%s" "$session_id"
+}
+
 wait_for_text() {
   path="$1"
   expected="$2"
@@ -126,13 +156,12 @@ wait_for_health
 
 tmp_dir="$(mktemp -d)"
 admin_cookie_header=""
-session_id="verify$(date +%s)$$"
-extra_session_id="verifyextra$(date +%s)$$"
+visitor_id="verify$(date +%s)$$"
+
+log "creating visitor session for $visitor_id"
+session_id="$(identify_visitor "$visitor_id")"
 user_text="deploy verify $session_id"
 reply_text="deploy reply $session_id"
-
-log "creating visitor session $session_id"
-curl -fsS "$BASE_URL/api/chat/$session_id" >/dev/null
 post_json "/api/chat/$session_id/messages" "$(printf '{"content":"%s"}' "$(json_escape "$user_text")")"
 
 log "logging in admin $admin_username"
@@ -152,8 +181,8 @@ log "creating SQLite backup"
 backup_path="$(sh ./scripts/backup-sqlite.sh)"
 test -s "$backup_path"
 
-log "creating post-backup session $extra_session_id"
-curl -fsS "$BASE_URL/api/chat/$extra_session_id" >/dev/null
+log "creating post-backup conversation for $visitor_id"
+extra_session_id="$(create_visitor_conversation "$visitor_id")"
 post_json "/api/chat/$extra_session_id/messages" "$(printf '{"content":"%s"}' "$(json_escape "extra after backup $extra_session_id")")"
 login_admin
 curl -fsS -H "Cookie: $admin_cookie_header" "$BASE_URL/api/admin/sessions" | grep -Fq "$extra_session_id"
