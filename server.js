@@ -1132,6 +1132,11 @@ async function handleStaticRequest(request, reply) {
     return;
   }
 
+  if (url.pathname === "/admin" || url.pathname === "/admin/") {
+    redirect(reply, isAdminAuthenticated(request) ? "/admin.html" : "/admin-login.html");
+    return;
+  }
+
   if (url.pathname === "/admin.html" && !isAdminAuthenticated(request)) {
     redirect(reply, "/admin-login.html");
     return;
