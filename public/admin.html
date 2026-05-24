@@ -42,13 +42,15 @@
             <div class="muted" id="activeMeta">打开访客页后，这里会出现新的会话。</div>
           </div>
           <div class="operator-actions">
-            <button class="ghost-button" id="manualNextButton" type="button" disabled>下条人工接管</button>
+            <div class="mode-switch" aria-label="回复模式">
+              <button class="mode-button" id="llmModeButton" type="button" disabled>LLM</button>
+              <button class="mode-button" id="manualModeButton" type="button" disabled>人工</button>
+            </div>
             <button class="danger-button" id="revealButton" type="button" disabled>摊牌</button>
           </div>
         </header>
 
         <section class="admin-messages" id="adminMessages" aria-live="polite"></section>
-        <section class="audit-panel" id="auditPanel" aria-label="操作日志"></section>
 
         <section class="quick-replies" aria-label="快捷回复">
           <button type="button" data-reply="短答案：">短答案</button>

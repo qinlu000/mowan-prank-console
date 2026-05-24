@@ -4,10 +4,10 @@ const adminMessagesEl = document.querySelector("#adminMessages");
 const activeTitleEl = document.querySelector("#activeTitle");
 const activeMetaEl = document.querySelector("#activeMeta");
 const operatorNameEl = document.querySelector("#operatorName");
-const auditPanelEl = document.querySelector("#auditPanel");
 const refreshButton = document.querySelector("#refreshButton");
 const revealButton = document.querySelector("#revealButton");
-const manualNextButton = document.querySelector("#manualNextButton");
+const llmModeButton = document.querySelector("#llmModeButton");
+const manualModeButton = document.querySelector("#manualModeButton");
 const replyForm = document.querySelector("#replyForm");
 const replyInput = document.querySelector("#replyInput");
 const replyButton = document.querySelector("#replyButton");
@@ -67,11 +67,9 @@ function describeAuditLog(log) {
     cleanup_expired_sessions: "清理过期会话",
     llm_error: "自动回复失败",
     llm_reply: "自动回复",
-    manual_next_reply_consumed: "人工接管生效",
-    manual_next_reply_disabled: "取消下条接管",
-    manual_next_reply_enabled: "下条人工接管",
     regenerate_request: "请求重新生成",
     reveal_prank: "点击摊牌",
+    reply_mode_changed: "切换回复模式",
     session_created: "创建会话",
     stop_generation: "停止生成",
     user_message: "发送消息"
@@ -81,10 +79,6 @@ function describeAuditLog(log) {
 }
 
 function previewText(session) {
-  if (session.manualNextReply) {
-    return "下一条访客消息将由人工接管";
-  }
-
   if (session.regenerateRequested) {
     return "访客请求重新生成上一条回复";
   }
@@ -95,6 +89,10 @@ function previewText(session) {
 
   if (session.adminTyping) {
     return "访客正在等待回复";
+  }
+
+  if (session.replyMode === "manual") {
+    return "人工模式：下一条消息等待后台回复";
   }
 
   if (!session.lastMessage) {
@@ -201,48 +199,21 @@ function createSystemNotice(text) {
   return row;
 }
 
-function renderAuditLogs(logs = []) {
-  if (!logs.length) {
-    auditPanelEl.replaceChildren();
-    return;
-  }
-
-  const title = document.createElement("div");
-  title.className = "audit-title";
-  title.textContent = "操作日志";
-
-  const items = logs.slice(0, 8).map((log) => {
-    const item = document.createElement("div");
-    item.className = "audit-item";
-
-    const main = document.createElement("span");
-    main.textContent = describeAuditLog(log);
-
-    const time = document.createElement("time");
-    time.dateTime = log.createdAt;
-    time.textContent = formatTime(log.createdAt);
-
-    item.append(main, time);
-    return item;
-  });
-
-  auditPanelEl.replaceChildren(title, ...items);
-}
-
 function setComposerEnabled(enabled) {
   replyInput.disabled = !enabled;
   replyButton.disabled = !enabled;
   revealButton.disabled = !enabled;
-  manualNextButton.disabled = !enabled;
+  llmModeButton.disabled = !enabled;
+  manualModeButton.disabled = !enabled;
 }
 
 function renderActiveSession(session) {
   activeTitleEl.textContent = session.title || "新访客";
-  manualNextButton.textContent = session.manualNextReply ? "已接管下条" : "下条人工接管";
-  manualNextButton.dataset.active = session.manualNextReply ? "true" : "false";
-  manualNextButton.title = session.manualNextReply
-    ? "下一条访客消息将等待人工回复"
-    : "让下一条访客消息不走 LLM，等待人工回复";
+  const replyMode = session.replyMode || "llm";
+  llmModeButton.dataset.active = replyMode === "llm" ? "true" : "false";
+  manualModeButton.dataset.active = replyMode === "manual" ? "true" : "false";
+  llmModeButton.title = "从下一条访客消息开始自动使用 LLM 回复";
+  manualModeButton.title = "从下一条访客消息开始等待人工回复";
 
   if (session.regenerateRequest) {
     activeMetaEl.textContent = `访客请求重新生成 · ${formatTime(session.regenerateRequest.createdAt)}`;
@@ -250,10 +221,10 @@ function renderActiveSession(session) {
     activeMetaEl.textContent = "回复正在流式输出到访客端";
   } else if (session.adminTyping) {
     activeMetaEl.textContent = "访客端正在显示思考中";
-  } else if (session.manualNextReply) {
-    activeMetaEl.textContent = "下一条访客消息将跳过 LLM，等待人工回复";
+  } else if (replyMode === "manual") {
+    activeMetaEl.textContent = "人工模式 · 下一条访客消息将等待后台回复";
   } else {
-    activeMetaEl.textContent = `${session.messageCount} 条消息 · 最近更新 ${formatTime(session.updatedAt)}`;
+    activeMetaEl.textContent = `LLM 模式 · ${session.messageCount} 条消息 · 最近更新 ${formatTime(session.updatedAt)}`;
   }
 
   setComposerEnabled(true);
@@ -262,10 +233,9 @@ function renderActiveSession(session) {
     ids: session.messages.map((message) => `${message.id}:${message.content}:${message.status}`),
     typing: session.adminTyping,
     generating: session.isGenerating,
-    manualNextReply: session.manualNextReply,
+    replyMode,
     revealed: session.revealed,
-    regenerate: session.regenerateRequest?.id || "",
-    auditLogs: (session.auditLogs || []).map((log) => `${log.id}:${log.actor}:${log.action}`)
+    regenerate: session.regenerateRequest?.id || ""
   });
   if (signature === activeSignature) {
     return;
@@ -277,14 +247,13 @@ function renderActiveSession(session) {
   const rows = session.messages.map(createMessageRow);
   if (session.regenerateRequest) {
     rows.push(createSystemNotice("访客点击了重新生成。你可以基于同一个问题再发一版更像 AI 的回复。"));
-  } else if (session.manualNextReply) {
-    rows.push(createSystemNotice("已开启下条人工接管。下一次访客要回复时，魔丸会等待你手动发出。"));
+  } else if (replyMode === "manual" && !session.adminTyping) {
+    rows.push(createSystemNotice("当前是人工模式。从下一条访客消息开始，魔丸会等待你手动发出回复。"));
   } else if (session.adminTyping && !session.isGenerating) {
     rows.push(createTypingRow());
   }
 
   adminMessagesEl.replaceChildren(...rows);
-  renderAuditLogs(session.auditLogs || []);
 
   if (shouldStickToBottom) {
     adminMessagesEl.scrollTop = adminMessagesEl.scrollHeight;
@@ -296,8 +265,8 @@ function renderActiveSession(session) {
 function renderNoActiveSession() {
   activeTitleEl.textContent = "等待访客";
   activeMetaEl.textContent = "打开访客页后，这里会出现新的会话。";
-  manualNextButton.textContent = "下条人工接管";
-  manualNextButton.dataset.active = "false";
+  llmModeButton.dataset.active = "false";
+  manualModeButton.dataset.active = "false";
   setComposerEnabled(false);
   activeSignature = "";
 
@@ -305,7 +274,6 @@ function renderNoActiveSession() {
   empty.className = "empty-state";
   empty.textContent = "选择一个会话后，就可以在这里手动扮演魔丸回复。";
   adminMessagesEl.replaceChildren(empty);
-  auditPanelEl.replaceChildren();
 }
 
 async function fetchCurrentAdmin() {
@@ -459,22 +427,19 @@ async function sendReply(content) {
   }
 }
 
-async function setManualNextReply(enabled) {
+async function setReplyMode(mode) {
   if (!activeSessionId) {
     return;
   }
 
-  const response = await fetch(
-    `/api/admin/sessions/${encodeURIComponent(activeSessionId)}/manual-next-reply`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled })
-    }
-  );
+  const response = await fetch(`/api/admin/sessions/${encodeURIComponent(activeSessionId)}/reply-mode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode })
+  });
   const payload = await readPayload(response);
   if (!response.ok) {
-    throw new Error(payload.error || "设置接管失败");
+    throw new Error(payload.error || "切换回复模式失败");
   }
 }
 
@@ -514,22 +479,33 @@ document.querySelectorAll("[data-reply]").forEach((button) => {
   });
 });
 
-manualNextButton.addEventListener("click", async () => {
+async function changeReplyMode(mode) {
   if (!activeSessionId) {
     return;
   }
 
-  const nextEnabled = manualNextButton.dataset.active !== "true";
-  manualNextButton.disabled = true;
+  if (
+    (mode === "llm" && llmModeButton.dataset.active === "true") ||
+    (mode === "manual" && manualModeButton.dataset.active === "true")
+  ) {
+    return;
+  }
+
+  llmModeButton.disabled = true;
+  manualModeButton.disabled = true;
   try {
-    await setManualNextReply(nextEnabled);
+    await setReplyMode(mode);
     await refreshAll();
   } catch (error) {
     activeMetaEl.textContent = error.message;
   } finally {
-    manualNextButton.disabled = false;
+    llmModeButton.disabled = false;
+    manualModeButton.disabled = false;
   }
-});
+}
+
+llmModeButton.addEventListener("click", () => changeReplyMode("llm"));
+manualModeButton.addEventListener("click", () => changeReplyMode("manual"));
 
 revealButton.addEventListener("click", async () => {
   if (!activeSessionId) {

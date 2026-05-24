@@ -56,7 +56,7 @@ OPENROUTER_HTTP_REFERER=https://mowan.example.com
 OPENROUTER_APP_TITLE=Mowan
 ```
 
-设置 `LLM_ENABLED=false` 可临时恢复纯人工模式。自动回复请求会关闭 reasoning effort，并过滤 `<think>` 内容；后台人工回复、停止生成和摊牌都会打断正在进行的 LLM 请求。后台也可以对单个会话开启“下条人工接管”，让下一次访客回复跳过 LLM，等待人工发出。
+设置 `LLM_ENABLED=false` 可临时恢复纯人工模式。自动回复请求会关闭 reasoning effort，并过滤 `<think>` 内容；后台人工回复、停止生成和摊牌都会打断正在进行的 LLM 请求。后台也可以对单个会话切换 `LLM / 人工` 模式，切换后从下一条访客消息开始生效。
 
 然后启动：
 
@@ -118,7 +118,7 @@ $env:ADMIN_PASSWORD="换成你的后台密码"
 $env:ADMIN_USERS="admin:换成你的后台密码,friend:换成朋友的后台密码"
 ```
 
-`ADMIN_USERS` 会在服务启动时创建或更新这些账号。后台回复、摊牌和登录退出都会写入操作日志，便于多人同时操作时追溯。
+`ADMIN_USERS` 会在服务启动时创建或更新这些账号。后台回复、摊牌和登录退出会写入数据库内日志，便于必要时排查；控制台界面不展示操作日志，避免遮挡聊天区。
 
 ## 备份和恢复
 
