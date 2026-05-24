@@ -21,7 +21,13 @@ pnpm install
 
 服务器需要安装 Docker 和 Docker Compose。建议先把域名解析到 VPS 公网 IP，并开放 80/443 端口。
 
-在服务器上创建 `.env`。推荐从生产模板复制：
+在服务器上创建 `.env`。推荐先用脚本生成：
+
+```bash
+pnpm create:env -- --domain mowan.example.com
+```
+
+也可以从生产模板复制：
 
 ```bash
 cp .env.production.example .env

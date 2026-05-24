@@ -14,10 +14,18 @@
 ```bash
 git clone https://github.com/qinlu000/mowan-prank-console.git
 cd mowan-prank-console
+corepack enable
+corepack prepare pnpm@11.2.2 --activate
+pnpm create:env -- --domain 你的域名
+```
+
+脚本会生成 `.env`、随机 `COOKIE_SECRET` 和随机后台密码。也可以手动复制模板：
+
+```bash
 cp .env.production.example .env
 ```
 
-编辑 `.env`，至少替换：
+手动编辑 `.env` 时，至少替换：
 
 - `DOMAIN`
 - `ADMIN_USERS`

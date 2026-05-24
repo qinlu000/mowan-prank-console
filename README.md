@@ -83,7 +83,13 @@ pnpm run dev
 
 ## Docker 部署
 
-复制 `.env.production.example` 为 `.env`，至少设置 `DOMAIN`、`ADMIN_USERS` 和 `COOKIE_SECRET`，然后在 VPS 上运行：
+在 VPS 上可以先生成生产 `.env`：
+
+```bash
+pnpm create:env -- --domain mowan.example.com
+```
+
+也可以复制 `.env.production.example` 为 `.env`，手动设置 `DOMAIN`、`ADMIN_USERS` 和 `COOKIE_SECRET`。然后运行：
 
 ```bash
 docker compose up -d --build
