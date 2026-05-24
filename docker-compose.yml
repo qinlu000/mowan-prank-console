@@ -17,6 +17,7 @@ services:
       LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.7}
       LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-900}
       LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-45000}
+      LLM_RETRY_COUNT: ${LLM_RETRY_COUNT:-2}
     volumes:
       - mowan_data:/data
     healthcheck:

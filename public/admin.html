@@ -41,7 +41,10 @@
             <div class="panel-title" id="activeTitle">等待访客</div>
             <div class="muted" id="activeMeta">打开访客页后，这里会出现新的会话。</div>
           </div>
-          <button class="danger-button" id="revealButton" type="button" disabled>摊牌</button>
+          <div class="operator-actions">
+            <button class="ghost-button" id="manualNextButton" type="button" disabled>下条人工接管</button>
+            <button class="danger-button" id="revealButton" type="button" disabled>摊牌</button>
+          </div>
         </header>
 
         <section class="admin-messages" id="adminMessages" aria-live="polite"></section>

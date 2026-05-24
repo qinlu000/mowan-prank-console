@@ -33,6 +33,7 @@ const config = {
   llmTemperature: Number(process.env.LLM_TEMPERATURE || 0.7),
   llmMaxTokens: Number(process.env.LLM_MAX_TOKENS || 900),
   llmTimeoutMs: Number(process.env.LLM_TIMEOUT_MS || 45000),
+  llmRetryCount: Number(process.env.LLM_RETRY_COUNT || 2),
   llmFallbackReply:
     process.env.LLM_FALLBACK_REPLY || "我刚刚有点卡住了。你换个问法再发我一次，我继续接。"
 };
@@ -163,6 +164,15 @@ function verifySignedCookieValue(value) {
   return token;
 }
 
+function ensureColumn(database, table, column, definition) {
+  const columns = database.prepare(`PRAGMA table_info(${table})`).all();
+  if (columns.some((item) => item.name === column)) {
+    return;
+  }
+
+  database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
 function createDatabase() {
   const databasePath = resolveDatabasePath(config.databaseUrl);
   if (databasePath !== ":memory:") {
@@ -199,6 +209,7 @@ function createDatabase() {
       last_seen_at TEXT NOT NULL,
       admin_typing INTEGER NOT NULL DEFAULT 0,
       revealed INTEGER NOT NULL DEFAULT 0,
+      manual_next_reply INTEGER NOT NULL DEFAULT 0,
       regenerate_request TEXT
     );
 
@@ -233,6 +244,7 @@ function createDatabase() {
   database
     .prepare("UPDATE messages SET status = 'stopped', updated_at = ? WHERE status = 'streaming'")
     .run(now());
+  ensureColumn(database, "sessions", "manual_next_reply", "INTEGER NOT NULL DEFAULT 0");
 
   return database;
 }
@@ -262,14 +274,15 @@ const statements = {
   deleteExpiredAdminSessions: db.prepare("DELETE FROM admin_sessions WHERE expires_at <= ?"),
   upsertSession: db.prepare(`
     INSERT INTO sessions (
-      id, title, created_at, updated_at, last_seen_at, admin_typing, revealed, regenerate_request
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      id, title, created_at, updated_at, last_seen_at, admin_typing, revealed, manual_next_reply, regenerate_request
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       title = excluded.title,
       updated_at = excluded.updated_at,
       last_seen_at = excluded.last_seen_at,
       admin_typing = excluded.admin_typing,
       revealed = excluded.revealed,
+      manual_next_reply = excluded.manual_next_reply,
       regenerate_request = excluded.regenerate_request
   `),
   upsertMessage: db.prepare(`
@@ -375,6 +388,7 @@ function persistSession(session) {
     session.lastSeenAt,
     session.adminTyping ? 1 : 0,
     session.revealed ? 1 : 0,
+    session.manualNextReply ? 1 : 0,
     session.regenerateRequest ? JSON.stringify(session.regenerateRequest) : null
   );
 }
@@ -419,6 +433,7 @@ function hydrateSession(row) {
     lastSeenAt: row.last_seen_at,
     adminTyping: Boolean(row.admin_typing),
     revealed: Boolean(row.revealed),
+    manualNextReply: Boolean(row.manual_next_reply),
     regenerateRequest: parseJson(row.regenerate_request, null),
     generation: null,
     pendingTimers: new Set(),
@@ -477,6 +492,7 @@ function getSession(id) {
       lastSeenAt: createdAt,
       adminTyping: false,
       revealed: false,
+      manualNextReply: false,
       regenerateRequest: null,
       generation: null,
       pendingTimers: new Set(),
@@ -536,6 +552,7 @@ function summarizeSession(session) {
     adminTyping: session.adminTyping,
     isGenerating,
     generationType: session.generation?.type || null,
+    manualNextReply: session.manualNextReply,
     regenerateRequested: Boolean(session.regenerateRequest),
     regenerateRequest: session.regenerateRequest,
     revealed: session.revealed,
@@ -564,6 +581,7 @@ function publicSession(session) {
     typing: awaitingReply,
     awaitingReply,
     isGenerating,
+    manualNextReply: session.manualNextReply,
     canRegenerate: canRegenerate(session),
     revealed: session.revealed
   };
@@ -1024,7 +1042,9 @@ async function requestLlmCompletion(session, generation) {
   const payload = parseJson(responseText, {});
   if (!response.ok) {
     const message = payload?.error?.message || payload?.error || responseText || response.statusText;
-    throw new Error(`OpenRouter ${response.status}: ${message}`);
+    const error = new Error(`OpenRouter ${response.status}: ${message}`);
+    error.statusCode = response.status;
+    throw error;
   }
 
   const content = cleanLlmContent(llmMessageContent(payload?.choices?.[0]?.message?.content));
@@ -1033,6 +1053,52 @@ async function requestLlmCompletion(session, generation) {
   }
 
   return content;
+}
+
+function isRetriableLlmError(error) {
+  if (error?.name === "AbortError") {
+    return false;
+  }
+
+  if (error?.statusCode) {
+    return error.statusCode === 429 || error.statusCode >= 500;
+  }
+
+  const code = error?.cause?.code || error?.code || "";
+  return code.startsWith("UND_") || code === "ECONNRESET" || code === "ETIMEDOUT";
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function requestLlmCompletionWithRetry(session, generation) {
+  const retryCount = Math.max(0, Math.min(Number(config.llmRetryCount) || 0, 4));
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    try {
+      const content = await requestLlmCompletion(session, generation);
+      generation.attempts = attempt + 1;
+      return content;
+    } catch (error) {
+      lastError = error;
+      generation.attempts = attempt + 1;
+      if (
+        generation.stopped ||
+        generation.abortController.signal.aborted ||
+        attempt >= retryCount ||
+        !isRetriableLlmError(error)
+      ) {
+        throw error;
+      }
+      await sleep(600 * (attempt + 1));
+    }
+  }
+
+  throw lastError;
 }
 
 function startLlmReply(session, options = {}) {
@@ -1064,7 +1130,7 @@ function startLlmReply(session, options = {}) {
   session.adminTyping = true;
   touch(session);
 
-  requestLlmCompletion(session, generation)
+  requestLlmCompletionWithRetry(session, generation)
     .then((content) => {
       if (session.generation !== generation) {
         return;
@@ -1075,7 +1141,12 @@ function startLlmReply(session, options = {}) {
       recordAuditLog("llm_reply", {
         sessionId: session.id,
         actor: "魔丸",
-        detail: { model: config.llmModel, reason: generation.reason, length: content.length }
+        detail: {
+          model: config.llmModel,
+          reason: generation.reason,
+          attempts: generation.attempts || 1,
+          length: content.length
+        }
       });
     })
     .catch((error) => {
@@ -1090,6 +1161,7 @@ function startLlmReply(session, options = {}) {
         detail: {
           model: config.llmModel,
           reason: generation.reason,
+          attempts: generation.attempts || 1,
           timedOut: generation.timedOut,
           message: error.message,
           cause: error.cause
@@ -1104,6 +1176,20 @@ function startLlmReply(session, options = {}) {
       startStreamingReply(session, config.llmFallbackReply);
     });
 
+  return true;
+}
+
+function consumeManualNextReply(session, reason) {
+  if (!session.manualNextReply) {
+    return false;
+  }
+
+  session.manualNextReply = false;
+  recordAuditLog("manual_next_reply_consumed", {
+    sessionId: session.id,
+    actor: "system",
+    detail: { reason }
+  });
   return true;
 }
 
@@ -1200,11 +1286,14 @@ async function postChatMessage(request, reply) {
   if (session.title === newVisitorTitle) {
     session.title = content.length > 28 ? `${content.slice(0, 28)}...` : content;
   }
+  const shouldWaitForManualReply = consumeManualNextReply(session, "user_message");
   session.regenerateRequest = null;
   session.adminTyping = true;
   touch(session);
   recordAuditLog("user_message", { sessionId: session.id, actor: "visitor" });
-  startLlmReply(session, { reason: "user_message" });
+  if (!shouldWaitForManualReply) {
+    startLlmReply(session, { reason: "user_message" });
+  }
   sendJson(reply, 201, publicSession(session));
 }
 
@@ -1238,6 +1327,7 @@ async function requestRegenerate(request, reply) {
   }
 
   stopActiveGeneration(session, "stopped");
+  const shouldWaitForManualReply = consumeManualNextReply(session, "regenerate");
   session.regenerateRequest = {
     id: randomUUID(),
     createdAt: now(),
@@ -1246,7 +1336,9 @@ async function requestRegenerate(request, reply) {
   session.adminTyping = true;
   touch(session);
   recordAuditLog("regenerate_request", { sessionId: session.id, actor: "visitor" });
-  startLlmReply(session, { reason: "regenerate", excludeMessageId: lastAssistant.id });
+  if (!shouldWaitForManualReply) {
+    startLlmReply(session, { reason: "regenerate", excludeMessageId: lastAssistant.id });
+  }
   sendJson(reply, 200, { ok: true, session: publicSession(session) });
 }
 
@@ -1289,6 +1381,26 @@ async function setAdminTyping(request, reply) {
   sendJson(reply, 200, { ok: true, typing: session.adminTyping });
 }
 
+async function setManualNextReply(request, reply) {
+  const session = sessionFromRequest(request, reply);
+  if (!session) {
+    return;
+  }
+
+  const body = requestBody(request);
+  session.manualNextReply = Boolean(body.enabled);
+  recordAuditLog(session.manualNextReply ? "manual_next_reply_enabled" : "manual_next_reply_disabled", {
+    sessionId: session.id,
+    actor: request.admin?.username || "admin"
+  });
+  touch(session);
+  sendJson(reply, 200, {
+    ok: true,
+    manualNextReply: session.manualNextReply,
+    session: summarizeSession(session)
+  });
+}
+
 async function sendAdminReply(request, reply) {
   const session = sessionFromRequest(request, reply);
   if (!session) {
@@ -1308,6 +1420,7 @@ async function sendAdminReply(request, reply) {
   }
 
   const delayMs = Math.max(0, Math.min(Number(body.delayMs || 0), 8000));
+  session.manualNextReply = false;
   queueReply(session, content, delayMs);
   recordAuditLog("admin_reply", {
     sessionId: session.id,
@@ -1330,6 +1443,7 @@ async function revealPrank(request, reply) {
   }
 
   stopActiveGeneration(session, "stopped");
+  session.manualNextReply = false;
   const message = createMessage(
     "assistant",
     "我摊牌了，我可是魔丸。你以为刚才是在和大模型聊天？其实一直有人在后台手动接招。欢迎来到魔丸整蛊现场。"
@@ -1362,6 +1476,7 @@ function registerRoutes(app) {
   app.get("/api/admin/events", { preHandler: requireAdmin }, streamAdminEvents);
   app.get("/api/admin/sessions/:sessionId", { preHandler: requireAdmin }, getAdminSession);
   app.post("/api/admin/sessions/:sessionId/typing", { preHandler: requireAdmin }, setAdminTyping);
+  app.post("/api/admin/sessions/:sessionId/manual-next-reply", { preHandler: requireAdmin }, setManualNextReply);
   app.post("/api/admin/sessions/:sessionId/reply", { preHandler: requireAdmin }, sendAdminReply);
   app.post("/api/admin/sessions/:sessionId/reveal", { preHandler: requireAdmin }, revealPrank);
 }

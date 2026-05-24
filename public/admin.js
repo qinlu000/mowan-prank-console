@@ -7,6 +7,7 @@ const operatorNameEl = document.querySelector("#operatorName");
 const auditPanelEl = document.querySelector("#auditPanel");
 const refreshButton = document.querySelector("#refreshButton");
 const revealButton = document.querySelector("#revealButton");
+const manualNextButton = document.querySelector("#manualNextButton");
 const replyForm = document.querySelector("#replyForm");
 const replyInput = document.querySelector("#replyInput");
 const replyButton = document.querySelector("#replyButton");
@@ -64,6 +65,11 @@ function describeAuditLog(log) {
     admin_logout: "退出后台",
     admin_reply: "发送回复",
     cleanup_expired_sessions: "清理过期会话",
+    llm_error: "自动回复失败",
+    llm_reply: "自动回复",
+    manual_next_reply_consumed: "人工接管生效",
+    manual_next_reply_disabled: "取消下条接管",
+    manual_next_reply_enabled: "下条人工接管",
     regenerate_request: "请求重新生成",
     reveal_prank: "点击摊牌",
     session_created: "创建会话",
@@ -75,6 +81,10 @@ function describeAuditLog(log) {
 }
 
 function previewText(session) {
+  if (session.manualNextReply) {
+    return "下一条访客消息将由人工接管";
+  }
+
   if (session.regenerateRequested) {
     return "访客请求重新生成上一条回复";
   }
@@ -223,10 +233,16 @@ function setComposerEnabled(enabled) {
   replyInput.disabled = !enabled;
   replyButton.disabled = !enabled;
   revealButton.disabled = !enabled;
+  manualNextButton.disabled = !enabled;
 }
 
 function renderActiveSession(session) {
   activeTitleEl.textContent = session.title || "新访客";
+  manualNextButton.textContent = session.manualNextReply ? "已接管下条" : "下条人工接管";
+  manualNextButton.dataset.active = session.manualNextReply ? "true" : "false";
+  manualNextButton.title = session.manualNextReply
+    ? "下一条访客消息将等待人工回复"
+    : "让下一条访客消息不走 LLM，等待人工回复";
 
   if (session.regenerateRequest) {
     activeMetaEl.textContent = `访客请求重新生成 · ${formatTime(session.regenerateRequest.createdAt)}`;
@@ -234,6 +250,8 @@ function renderActiveSession(session) {
     activeMetaEl.textContent = "回复正在流式输出到访客端";
   } else if (session.adminTyping) {
     activeMetaEl.textContent = "访客端正在显示思考中";
+  } else if (session.manualNextReply) {
+    activeMetaEl.textContent = "下一条访客消息将跳过 LLM，等待人工回复";
   } else {
     activeMetaEl.textContent = `${session.messageCount} 条消息 · 最近更新 ${formatTime(session.updatedAt)}`;
   }
@@ -244,6 +262,7 @@ function renderActiveSession(session) {
     ids: session.messages.map((message) => `${message.id}:${message.content}:${message.status}`),
     typing: session.adminTyping,
     generating: session.isGenerating,
+    manualNextReply: session.manualNextReply,
     revealed: session.revealed,
     regenerate: session.regenerateRequest?.id || "",
     auditLogs: (session.auditLogs || []).map((log) => `${log.id}:${log.actor}:${log.action}`)
@@ -258,6 +277,8 @@ function renderActiveSession(session) {
   const rows = session.messages.map(createMessageRow);
   if (session.regenerateRequest) {
     rows.push(createSystemNotice("访客点击了重新生成。你可以基于同一个问题再发一版更像 AI 的回复。"));
+  } else if (session.manualNextReply) {
+    rows.push(createSystemNotice("已开启下条人工接管。下一次访客要回复时，魔丸会等待你手动发出。"));
   } else if (session.adminTyping && !session.isGenerating) {
     rows.push(createTypingRow());
   }
@@ -275,6 +296,8 @@ function renderActiveSession(session) {
 function renderNoActiveSession() {
   activeTitleEl.textContent = "等待访客";
   activeMetaEl.textContent = "打开访客页后，这里会出现新的会话。";
+  manualNextButton.textContent = "下条人工接管";
+  manualNextButton.dataset.active = "false";
   setComposerEnabled(false);
   activeSignature = "";
 
@@ -436,6 +459,25 @@ async function sendReply(content) {
   }
 }
 
+async function setManualNextReply(enabled) {
+  if (!activeSessionId) {
+    return;
+  }
+
+  const response = await fetch(
+    `/api/admin/sessions/${encodeURIComponent(activeSessionId)}/manual-next-reply`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled })
+    }
+  );
+  const payload = await readPayload(response);
+  if (!response.ok) {
+    throw new Error(payload.error || "设置接管失败");
+  }
+}
+
 replyForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const content = replyInput.value.trim();
@@ -470,6 +512,23 @@ document.querySelectorAll("[data-reply]").forEach((button) => {
     replyInput.focus();
     announceTyping();
   });
+});
+
+manualNextButton.addEventListener("click", async () => {
+  if (!activeSessionId) {
+    return;
+  }
+
+  const nextEnabled = manualNextButton.dataset.active !== "true";
+  manualNextButton.disabled = true;
+  try {
+    await setManualNextReply(nextEnabled);
+    await refreshAll();
+  } catch (error) {
+    activeMetaEl.textContent = error.message;
+  } finally {
+    manualNextButton.disabled = false;
+  }
 });
 
 revealButton.addEventListener("click", async () => {

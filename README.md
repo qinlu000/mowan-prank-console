@@ -10,6 +10,7 @@
 - 后台会话列表和手动回复控制台
 - 后台登录保护，支持 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 和 `ADMIN_USERS` 多管理员配置
 - 访客发送后显示“正在思考”
+- 可通过 OpenRouter 启用默认 LLM 回复，后台可设置“下条人工接管”
 - 后台回复在访客端流式输出
 - 访客端和后台端通过 SSE 事件流实时更新，断线后低频刷新兜底
 - 支持停止生成和重新生成
@@ -74,6 +75,7 @@ OPENROUTER_API_KEY=sk-or-v1-your-openrouter-key
 LLM_MODEL=deepseek/deepseek-v3.2
 LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=900
+LLM_RETRY_COUNT=2
 ```
 
 `LLM_ENABLED=false` 可以临时关掉自动 LLM，恢复纯人工回复。请求里会使用 `reasoning.effort=none` 并要求模型不要输出 `<think>` 内容。

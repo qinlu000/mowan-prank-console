@@ -115,6 +115,7 @@ function main() {
     "LLM_TEMPERATURE=0.7",
     "LLM_MAX_TOKENS=900",
     "LLM_TIMEOUT_MS=45000",
+    "LLM_RETRY_COUNT=2",
     "# OPENROUTER_API_KEY=sk-or-v1-your-openrouter-key",
     `# OPENROUTER_HTTP_REFERER=https://${domain}`,
     "# OPENROUTER_APP_TITLE=Mowan",

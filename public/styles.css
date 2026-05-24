@@ -136,6 +136,12 @@ textarea:disabled {
   background: var(--surface-hover);
 }
 
+.ghost-button[data-active="true"] {
+  border-color: rgba(16, 163, 127, 0.32);
+  color: var(--accent);
+  background: rgba(16, 163, 127, 0.08);
+}
+
 .danger-button {
   border-color: rgba(194, 65, 75, 0.25);
   color: var(--danger);
@@ -651,6 +657,14 @@ input:focus {
 
 .session-toolbar {
   padding: 14px 16px;
+}
+
+.operator-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .operator-badge {

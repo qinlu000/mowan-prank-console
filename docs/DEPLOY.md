@@ -51,11 +51,12 @@ OPENROUTER_API_KEY=sk-or-v1-your-openrouter-key
 LLM_MODEL=deepseek/deepseek-v3.2
 LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=900
+LLM_RETRY_COUNT=2
 OPENROUTER_HTTP_REFERER=https://mowan.example.com
 OPENROUTER_APP_TITLE=Mowan
 ```
 
-设置 `LLM_ENABLED=false` 可临时恢复纯人工模式。自动回复请求会关闭 reasoning effort，并过滤 `<think>` 内容；后台人工回复、停止生成和摊牌都会打断正在进行的 LLM 请求。
+设置 `LLM_ENABLED=false` 可临时恢复纯人工模式。自动回复请求会关闭 reasoning effort，并过滤 `<think>` 内容；后台人工回复、停止生成和摊牌都会打断正在进行的 LLM 请求。后台也可以对单个会话开启“下条人工接管”，让下一次访客回复跳过 LLM，等待人工发出。
 
 然后启动：
 
