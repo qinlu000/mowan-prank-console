@@ -1090,7 +1090,7 @@ async function revealPrank(request, reply) {
   stopActiveGeneration(session, "stopped");
   const message = createMessage(
     "assistant",
-    "摊牌了：这个聊天窗口背后不是大模型，是有人在后台手动回复你。你刚刚参与了一个 LLM 网站整蛊实验。"
+    "我摊牌了，我可是魔丸。你以为刚才是在和大模型聊天？其实一直有人在后台手动接招。欢迎来到魔丸整蛊现场。"
   );
   session.messages.push(message);
   persistMessage(session, message);
