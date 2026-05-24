@@ -31,6 +31,12 @@ cp .env.production.example .env
 - `ADMIN_USERS`
 - `COOKIE_SECRET`
 
+如果要启用默认 LLM 回复，额外填写：
+
+- `OPENROUTER_API_KEY`
+- `LLM_MODEL=deepseek/deepseek-v3.2`
+- `OPENROUTER_HTTP_REFERER=https://你的域名`
+
 启动并验收：
 
 ```bash

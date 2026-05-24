@@ -44,6 +44,19 @@ SESSION_RETENTION_DAYS=7
 
 `COOKIE_SECRET` 用来给后台登录 cookie 加签。正式部署时必须固定下来，不要每次启动都换，否则已有后台登录会失效。
 
+如需让魔丸默认用 LLM 回复，在 `.env` 里额外配置 OpenRouter：
+
+```env
+OPENROUTER_API_KEY=sk-or-v1-your-openrouter-key
+LLM_MODEL=deepseek/deepseek-v3.2
+LLM_TEMPERATURE=0.7
+LLM_MAX_TOKENS=900
+OPENROUTER_HTTP_REFERER=https://mowan.example.com
+OPENROUTER_APP_TITLE=Mowan
+```
+
+设置 `LLM_ENABLED=false` 可临时恢复纯人工模式。自动回复请求会关闭 reasoning effort，并过滤 `<think>` 内容；后台人工回复、停止生成和摊牌都会打断正在进行的 LLM 请求。
+
 然后启动：
 
 ```bash

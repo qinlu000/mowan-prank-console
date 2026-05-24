@@ -9,6 +9,14 @@ services:
       SESSION_RETENTION_DAYS: ${SESSION_RETENTION_DAYS:-7}
       ADMIN_USERS: ${ADMIN_USERS:?Set ADMIN_USERS in .env before starting}
       COOKIE_SECRET: ${COOKIE_SECRET:-change-this-cookie-secret}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_HTTP_REFERER: ${OPENROUTER_HTTP_REFERER:-}
+      OPENROUTER_APP_TITLE: ${OPENROUTER_APP_TITLE:-Mowan}
+      LLM_ENABLED: ${LLM_ENABLED:-}
+      LLM_MODEL: ${LLM_MODEL:-deepseek/deepseek-v3.2}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.7}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-900}
+      LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-45000}
     volumes:
       - mowan_data:/data
     healthcheck:

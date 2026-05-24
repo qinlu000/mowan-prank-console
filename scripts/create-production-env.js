@@ -108,6 +108,16 @@ function main() {
     `ADMIN_USERS=${admin}:${password}`,
     `COOKIE_SECRET=${cookieSecret}`,
     `SESSION_RETENTION_DAYS=${retention}`,
+    "",
+    "# Optional: enable default LLM replies through OpenRouter.",
+    "LLM_ENABLED=false",
+    "LLM_MODEL=deepseek/deepseek-v3.2",
+    "LLM_TEMPERATURE=0.7",
+    "LLM_MAX_TOKENS=900",
+    "LLM_TIMEOUT_MS=45000",
+    "# OPENROUTER_API_KEY=sk-or-v1-your-openrouter-key",
+    `# OPENROUTER_HTTP_REFERER=https://${domain}`,
+    "# OPENROUTER_APP_TITLE=Mowan",
     ""
   ].join("\n");
 

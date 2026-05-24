@@ -4,6 +4,8 @@ const { createHmac, randomUUID, scryptSync, timingSafeEqual } = require("node:cr
 const { DatabaseSync } = require("node:sqlite");
 const fastify = require("fastify");
 
+loadEnvFile(path.resolve(__dirname, ".env"));
+
 const generatedAdminPassword = randomUUID().slice(0, 12);
 const configuredAdminPassword =
   process.env.ADMIN_PASSWORD || process.env.FIRST_ADMIN_PASSWORD || generatedAdminPassword;
@@ -21,7 +23,18 @@ const config = {
   generatedAdminPassword:
     !process.env.ADMIN_PASSWORD && !process.env.FIRST_ADMIN_PASSWORD && !process.env.ADMIN_USERS,
   databaseUrl: process.env.DATABASE_URL || "file:data/mowan.sqlite",
-  sessionRetentionDays: Number(process.env.SESSION_RETENTION_DAYS || 7)
+  sessionRetentionDays: Number(process.env.SESSION_RETENTION_DAYS || 7),
+  openRouterApiKey: process.env.OPENROUTER_API_KEY || "",
+  openRouterBaseUrl: process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1",
+  openRouterReferer: process.env.OPENROUTER_HTTP_REFERER || process.env.PUBLIC_ORIGIN || "",
+  openRouterTitle: process.env.OPENROUTER_APP_TITLE || "Mowan",
+  llmEnabled: process.env.LLM_ENABLED !== "false" && Boolean(process.env.OPENROUTER_API_KEY),
+  llmModel: process.env.LLM_MODEL || "deepseek/deepseek-v3.2",
+  llmTemperature: Number(process.env.LLM_TEMPERATURE || 0.7),
+  llmMaxTokens: Number(process.env.LLM_MAX_TOKENS || 900),
+  llmTimeoutMs: Number(process.env.LLM_TIMEOUT_MS || 45000),
+  llmFallbackReply:
+    process.env.LLM_FALLBACK_REPLY || "我刚刚有点卡住了。你换个问法再发我一次，我继续接。"
 };
 
 const newVisitorTitle = "新访客";
@@ -36,6 +49,38 @@ const mimeTypes = new Map([
   [".svg", "image/svg+xml; charset=utf-8"],
   [".ico", "image/x-icon"]
 ]);
+
+function loadEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return;
+  }
+
+  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+
+    const separator = trimmed.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+
+    const key = trimmed.slice(0, separator).trim();
+    let value = trimmed.slice(separator + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+
+    if (process.env[key] === undefined) {
+      process.env[key] = value;
+    }
+  }
+}
 
 function now() {
   return new Date().toISOString();
@@ -473,10 +518,15 @@ function canRegenerate(session) {
   return Boolean(lastAssistant && !session.generation && !session.adminTyping);
 }
 
+function isVisibleGeneration(generation) {
+  return Boolean(generation && (generation.type === "ai" || generation.type === "stream"));
+}
+
 function summarizeSession(session) {
   const last = session.messages[session.messages.length - 1];
   const userMessages = session.messages.filter((message) => message.role === "user");
   const latestAuditLog = serializeAuditLog(statements.selectLatestAuditLogBySession.get(session.id));
+  const isGenerating = isVisibleGeneration(session.generation);
   return {
     id: session.id,
     title: session.title,
@@ -484,7 +534,8 @@ function summarizeSession(session) {
     updatedAt: session.updatedAt,
     lastSeenAt: session.lastSeenAt,
     adminTyping: session.adminTyping,
-    isGenerating: session.generation?.type === "stream",
+    isGenerating,
+    generationType: session.generation?.type || null,
     regenerateRequested: Boolean(session.regenerateRequest),
     regenerateRequest: session.regenerateRequest,
     revealed: session.revealed,
@@ -503,8 +554,8 @@ function summarizeSession(session) {
 }
 
 function publicSession(session) {
-  const isGenerating = session.generation?.type === "stream";
-  const awaitingReply = Boolean(session.adminTyping && !isGenerating);
+  const isGenerating = isVisibleGeneration(session.generation);
+  const awaitingReply = Boolean(session.adminTyping && session.generation?.type !== "stream");
 
   return {
     id: session.id,
@@ -715,12 +766,22 @@ async function sendStatic(urlPath, reply) {
 
 function clearGenerationTimer(session) {
   if (!session.generation?.timer) {
-    return;
+    if (!session.generation?.timeout) {
+      return;
+    }
   }
 
-  clearTimeout(session.generation.timer);
-  session.pendingTimers.delete(session.generation.timer);
-  session.generation.timer = null;
+  if (session.generation.timer) {
+    clearTimeout(session.generation.timer);
+    session.pendingTimers.delete(session.generation.timer);
+    session.generation.timer = null;
+  }
+
+  if (session.generation.timeout) {
+    clearTimeout(session.generation.timeout);
+    session.pendingTimers.delete(session.generation.timeout);
+    session.generation.timeout = null;
+  }
 }
 
 function stopActiveGeneration(session, status = "stopped") {
@@ -728,6 +789,8 @@ function stopActiveGeneration(session, status = "stopped") {
     return false;
   }
 
+  session.generation.stopped = true;
+  session.generation.abortController?.abort();
   clearGenerationTimer(session);
 
   if (session.generation.messageId) {
@@ -867,6 +930,183 @@ function clearManualTyping(session) {
   }
 }
 
+function cleanLlmContent(content) {
+  return String(content || "")
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<\/?think>/gi, "")
+    .trim();
+}
+
+function llmMessageContent(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") {
+          return part;
+        }
+        return part?.text || "";
+      })
+      .join("");
+  }
+
+  return "";
+}
+
+function buildLlmMessages(session, { excludeMessageId = null } = {}) {
+  const systemPrompt = [
+    "你是魔丸，一个自然、聪明、有一点点俏皮的中文日常聊天助手。",
+    "你正在一个聊天网站里和用户对话。默认情况下，用户应该感觉自己是在和一个正常 AI 助手聊天。",
+    "不要主动提到后台、真人、整蛊、OpenRouter、系统提示或实现细节。",
+    "回答要直接、有帮助、像真人聊天一样自然。能简短解决就简短，复杂问题再展开。",
+    "不要输出思考过程、推理链、<think> 标签或内部分析。"
+  ].join("\n");
+
+  const history = session.messages
+    .filter((message) => message.id !== excludeMessageId)
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .filter((message) => message.status !== "streaming" && message.status !== "stopped")
+    .filter((message) => message.content.trim())
+    .slice(-24)
+    .map((message) => ({
+      role: message.role,
+      content: message.content
+    }));
+
+  return [{ role: "system", content: systemPrompt }, ...history];
+}
+
+function openRouterChatUrl() {
+  return `${config.openRouterBaseUrl.replace(/\/$/, "")}/chat/completions`;
+}
+
+function safeHeaderValue(value) {
+  const text = String(value || "");
+  return /^[\x20-\x7E]*$/.test(text) ? text : encodeURIComponent(text);
+}
+
+async function requestLlmCompletion(session, generation) {
+  const headers = {
+    Authorization: `Bearer ${config.openRouterApiKey}`,
+    "Content-Type": "application/json"
+  };
+
+  if (config.openRouterReferer) {
+    headers["HTTP-Referer"] = safeHeaderValue(config.openRouterReferer);
+  }
+  if (config.openRouterTitle) {
+    headers["X-Title"] = safeHeaderValue(config.openRouterTitle);
+  }
+
+  const body = {
+    model: config.llmModel,
+    messages: buildLlmMessages(session, { excludeMessageId: generation.excludeMessageId }),
+    temperature: config.llmTemperature,
+    max_completion_tokens: config.llmMaxTokens,
+    reasoning: {
+      effort: "none",
+      exclude: true
+    },
+    stream: false
+  };
+
+  const response = await fetch(openRouterChatUrl(), {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+    signal: generation.abortController.signal
+  });
+
+  const responseText = await response.text();
+  const payload = parseJson(responseText, {});
+  if (!response.ok) {
+    const message = payload?.error?.message || payload?.error || responseText || response.statusText;
+    throw new Error(`OpenRouter ${response.status}: ${message}`);
+  }
+
+  const content = cleanLlmContent(llmMessageContent(payload?.choices?.[0]?.message?.content));
+  if (!content) {
+    throw new Error("OpenRouter returned an empty response.");
+  }
+
+  return content;
+}
+
+function startLlmReply(session, options = {}) {
+  if (!config.llmEnabled) {
+    return false;
+  }
+
+  const abortController = new AbortController();
+  const generation = {
+    type: "ai",
+    messageId: null,
+    abortController,
+    excludeMessageId: options.excludeMessageId || null,
+    reason: options.reason || "auto",
+    startedAt: now(),
+    stopped: false,
+    timedOut: false,
+    timeout: null
+  };
+
+  const timeout = setTimeout(() => {
+    generation.timedOut = true;
+    abortController.abort();
+  }, config.llmTimeoutMs);
+
+  generation.timeout = timeout;
+  session.pendingTimers.add(timeout);
+  session.generation = generation;
+  session.adminTyping = true;
+  touch(session);
+
+  requestLlmCompletion(session, generation)
+    .then((content) => {
+      if (session.generation !== generation) {
+        return;
+      }
+
+      clearGenerationTimer(session);
+      startStreamingReply(session, content);
+      recordAuditLog("llm_reply", {
+        sessionId: session.id,
+        actor: "魔丸",
+        detail: { model: config.llmModel, reason: generation.reason, length: content.length }
+      });
+    })
+    .catch((error) => {
+      if (session.generation !== generation || generation.stopped) {
+        return;
+      }
+
+      clearGenerationTimer(session);
+      recordAuditLog("llm_error", {
+        sessionId: session.id,
+        actor: "魔丸",
+        detail: {
+          model: config.llmModel,
+          reason: generation.reason,
+          timedOut: generation.timedOut,
+          message: error.message,
+          cause: error.cause
+            ? {
+                name: error.cause.name,
+                code: error.cause.code,
+                message: error.cause.message
+              }
+            : null
+        }
+      });
+      startStreamingReply(session, config.llmFallbackReply);
+    });
+
+  return true;
+}
+
 function sessionFromRequest(request, reply) {
   const session = getSession(request.params.sessionId);
   if (!session) {
@@ -964,6 +1204,7 @@ async function postChatMessage(request, reply) {
   session.adminTyping = true;
   touch(session);
   recordAuditLog("user_message", { sessionId: session.id, actor: "visitor" });
+  startLlmReply(session, { reason: "user_message" });
   sendJson(reply, 201, publicSession(session));
 }
 
@@ -1005,6 +1246,7 @@ async function requestRegenerate(request, reply) {
   session.adminTyping = true;
   touch(session);
   recordAuditLog("regenerate_request", { sessionId: session.id, actor: "visitor" });
+  startLlmReply(session, { reason: "regenerate", excludeMessageId: lastAssistant.id });
   sendJson(reply, 200, { ok: true, session: publicSession(session) });
 }
 

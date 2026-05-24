@@ -65,6 +65,19 @@ pnpm start
 
 `ADMIN_USERS` 会在服务启动时创建或更新这些管理员账号。没有设置 `ADMIN_PASSWORD` 或 `ADMIN_USERS` 时，服务启动会在终端生成一个临时后台账号和密码。聊天数据默认保存到 `data/mowan.sqlite`，`data/` 不会提交到 Git。
 
+### 默认 LLM 回复
+
+本地开发可以在 `.env` 里接入 OpenRouter，让访客消息默认由 LLM 回复，同时后台管理员仍然可以随时手动回复、停止生成或点击“摊牌”来接管。
+
+```env
+OPENROUTER_API_KEY=sk-or-v1-your-openrouter-key
+LLM_MODEL=deepseek/deepseek-v3.2
+LLM_TEMPERATURE=0.7
+LLM_MAX_TOKENS=900
+```
+
+`LLM_ENABLED=false` 可以临时关掉自动 LLM，恢复纯人工回复。请求里会使用 `reasoning.effort=none` 并要求模型不要输出 `<think>` 内容。
+
 ## 常用命令
 
 ```powershell
