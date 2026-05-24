@@ -34,6 +34,8 @@ jobs:
           DOMAIN: :80
           VERIFY_BASE_URL: http://127.0.0.1
           ADMIN_USERS: admin:admin-pass
+          VERIFY_ADMIN_USERNAME: admin
+          VERIFY_ADMIN_PASSWORD: admin-pass
           COOKIE_SECRET: ci-cookie-secret
           SESSION_RETENTION_DAYS: 7
         run: sh scripts/verify-deploy.sh

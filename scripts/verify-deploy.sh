@@ -38,6 +38,10 @@ require_command() {
   fi
 }
 
+log() {
+  echo "[verify] $*"
+}
+
 json_escape() {
   printf "%s" "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
@@ -62,11 +66,19 @@ wait_for_health() {
 login_admin() {
   cookie_file="$1"
   login_body="$(printf '{"username":"%s","password":"%s"}' "$(json_escape "$admin_username")" "$(json_escape "$admin_password")")"
-  curl -fsS -c "$cookie_file" \
+  login_output="$tmp_dir/admin-login-response.json"
+  login_status="$(curl -sS -o "$login_output" -w "%{http_code}" -c "$cookie_file" \
     -H "Content-Type: application/json" \
     -X POST \
     --data "$login_body" \
-    "$BASE_URL/api/admin/login" | grep -q '"ok":true'
+    "$BASE_URL/api/admin/login")"
+
+  if [ "$login_status" != "200" ] || ! grep -q '"ok":true' "$login_output"; then
+    echo "Admin login failed with HTTP $login_status" >&2
+    cat "$login_output" >&2
+    docker compose logs --tail=80 app >&2
+    exit 1
+  fi
 }
 
 post_json() {
@@ -101,6 +113,7 @@ require_command curl
 require_command grep
 require_command sed
 
+log "starting docker compose deployment at $BASE_URL"
 docker compose up -d --build
 wait_for_health
 
@@ -111,26 +124,34 @@ extra_session_id="verifyextra$(date +%s)$$"
 user_text="deploy verify $session_id"
 reply_text="deploy reply $session_id"
 
+log "creating visitor session $session_id"
 curl -fsS "$BASE_URL/api/chat/$session_id" >/dev/null
 post_json "/api/chat/$session_id/messages" "$(printf '{"content":"%s"}' "$(json_escape "$user_text")")"
 
+log "logging in admin $admin_username"
 login_admin "$cookie_file"
+log "checking admin session list"
 curl -fsS -b "$cookie_file" "$BASE_URL/api/admin/sessions" | grep -Fq "$session_id"
+log "sending admin reply"
 post_json "/api/admin/sessions/$session_id/reply" "$(printf '{"content":"%s","delayMs":0}' "$(json_escape "$reply_text")")" "$cookie_file"
 wait_for_text "/api/chat/$session_id" "$reply_text"
 
+log "restarting app and checking persistence"
 docker compose restart app
 wait_for_health
 wait_for_text "/api/chat/$session_id" "$reply_text"
 
+log "creating SQLite backup"
 backup_path="$(sh ./scripts/backup-sqlite.sh)"
 test -s "$backup_path"
 
+log "creating post-backup session $extra_session_id"
 curl -fsS "$BASE_URL/api/chat/$extra_session_id" >/dev/null
 post_json "/api/chat/$extra_session_id/messages" "$(printf '{"content":"%s"}' "$(json_escape "extra after backup $extra_session_id")")"
 login_admin "$cookie_file"
 curl -fsS -b "$cookie_file" "$BASE_URL/api/admin/sessions" | grep -Fq "$extra_session_id"
 
+log "restoring SQLite backup"
 sh ./scripts/restore-sqlite.sh "$backup_path" >/dev/null
 wait_for_health
 login_admin "$cookie_file"
