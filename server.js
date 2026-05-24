@@ -750,6 +750,7 @@ function summarizeSession(session) {
   const userMessages = session.messages.filter((message) => message.role === "user");
   const isGenerating = isVisibleGeneration(session.generation);
   const canReply = canCompleteCurrentTurn(session);
+  const replyMode = session.replyMode || "llm";
   return {
     id: session.id,
     title: session.title,
@@ -760,8 +761,9 @@ function summarizeSession(session) {
     lastSeenAt: session.lastSeenAt,
     adminTyping: session.adminTyping,
     isGenerating,
-    replyMode: session.replyMode || "llm",
+    replyMode,
     canReply,
+    canTakeOver: Boolean(canReply && isGenerating),
     adminDraft: session.adminDraft,
     regenerateRequested: Boolean(session.regenerateRequest),
     regenerateRequest: session.regenerateRequest,
@@ -1885,25 +1887,7 @@ async function setReplyMode(request, reply) {
     actor: request.admin?.username || "admin",
     detail: { mode }
   });
-
-  if (mode === "manual" && canCompleteCurrentTurn(session)) {
-    stopActiveGeneration(session, "stopped");
-    session.adminTyping = true;
-    startLlmReference(session, { reason: "mode_switch_reference", force: true });
-  } else if (mode === "llm" && canCompleteCurrentTurn(session)) {
-    const targetMessageId = currentReplyTargetId(session);
-    clearAdminDraft(session);
-    const started = startLlmReply(session, {
-      reason: "mode_switch_llm",
-      excludeMessageId: currentReplyMessage(session)?.id || null,
-      targetMessageId
-    });
-    if (!started) {
-      queueReply(session, config.llmFallbackReply, 0, { messageId: targetMessageId });
-    }
-  } else {
-    touch(session);
-  }
+  touch(session);
   sendJson(reply, 200, {
     ok: true,
     replyMode: session.replyMode,
@@ -1914,6 +1898,11 @@ async function setReplyMode(request, reply) {
 async function requestAdminReference(request, reply) {
   const session = sessionFromRequest(request, reply);
   if (!session) {
+    return;
+  }
+
+  if (session.replyMode !== "manual") {
+    sendError(reply, 409, "先接管当前问题，或者把会话切到人工模式。");
     return;
   }
 
@@ -1931,6 +1920,37 @@ async function requestAdminReference(request, reply) {
   sendJson(reply, started ? 202 : 200, {
     ok: true,
     generating: started,
+    session: adminSessionDetail(session)
+  });
+}
+
+async function takeOverCurrentTurn(request, reply) {
+  const session = sessionFromRequest(request, reply);
+  if (!session) {
+    return;
+  }
+
+  if (!canCompleteCurrentTurn(session)) {
+    sendError(reply, 409, "当前没有可接管的问题，或者这个问题已经回复过了。");
+    return;
+  }
+
+  session.replyMode = "manual";
+  stopActiveGeneration(session, "stopped");
+  session.adminTyping = true;
+  const referenceStarted = startLlmReference(session, { reason: "admin_takeover_reference", force: true });
+  recordAuditLog("admin_takeover", {
+    sessionId: session.id,
+    actor: request.admin?.username || "admin",
+    detail: { referenceStarted }
+  });
+  if (!referenceStarted) {
+    touch(session);
+  }
+
+  sendJson(reply, 200, {
+    ok: true,
+    referenceStarted,
     session: adminSessionDetail(session)
   });
 }
@@ -2016,6 +2036,7 @@ function registerRoutes(app) {
   app.get("/api/admin/sessions/:sessionId", { preHandler: requireAdmin }, getAdminSession);
   app.post("/api/admin/sessions/:sessionId/typing", { preHandler: requireAdmin }, setAdminTyping);
   app.post("/api/admin/sessions/:sessionId/reply-mode", { preHandler: requireAdmin }, setReplyMode);
+  app.post("/api/admin/sessions/:sessionId/takeover", { preHandler: requireAdmin }, takeOverCurrentTurn);
   app.post("/api/admin/sessions/:sessionId/reference", { preHandler: requireAdmin }, requestAdminReference);
   app.post("/api/admin/sessions/:sessionId/reply", { preHandler: requireAdmin }, sendAdminReply);
   app.post("/api/admin/sessions/:sessionId/reveal", { preHandler: requireAdmin }, revealPrank);

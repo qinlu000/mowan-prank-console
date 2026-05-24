@@ -8,6 +8,7 @@ const refreshButton = document.querySelector("#refreshButton");
 const revealButton = document.querySelector("#revealButton");
 const llmModeButton = document.querySelector("#llmModeButton");
 const manualModeButton = document.querySelector("#manualModeButton");
+const takeoverButton = document.querySelector("#takeoverButton");
 const referencePanel = document.querySelector("#referencePanel");
 const referenceMetaEl = document.querySelector("#referenceMeta");
 const referenceContentEl = document.querySelector("#referenceContent");
@@ -64,6 +65,10 @@ function relativeTime(value) {
 function previewText(session) {
   if (session.regenerateRequested) {
     return "访客请求重新生成上一条回复";
+  }
+
+  if (session.canTakeOver) {
+    return "LLM 模式：可接管当前问题";
   }
 
   if (session.isGenerating) {
@@ -190,7 +195,7 @@ function renderReferencePanel(session) {
   const draft = session.adminDraft || null;
   activeAdminDraft = draft;
 
-  const shouldShow = Boolean(session.canReply && (session.replyMode === "manual" || draft));
+  const shouldShow = Boolean(session.canReply && !session.canTakeOver && (session.replyMode === "manual" || draft));
   referencePanel.hidden = !shouldShow;
   if (!shouldShow) {
     referenceMetaEl.textContent = "等待访客提问";
@@ -210,8 +215,8 @@ function renderReferencePanel(session) {
   referenceContentEl.textContent = status === "complete" ? draft.content : draft?.error || content;
 }
 
-function setComposerEnabled(enabled, canReply = false) {
-  const canUseComposer = Boolean(enabled && canReply);
+function setComposerEnabled(enabled, canReply = false, canTakeOver = false) {
+  const canUseComposer = Boolean(enabled && canReply && !canTakeOver);
   replyInput.disabled = !canUseComposer;
   replyButton.disabled = !canUseComposer;
   quickReplyButtons.forEach((button) => {
@@ -220,6 +225,7 @@ function setComposerEnabled(enabled, canReply = false) {
   revealButton.disabled = !enabled;
   llmModeButton.disabled = !enabled;
   manualModeButton.disabled = !enabled;
+  takeoverButton.disabled = !enabled || !canTakeOver;
 }
 
 function renderActiveSession(session) {
@@ -227,11 +233,16 @@ function renderActiveSession(session) {
   const replyMode = session.replyMode || "llm";
   llmModeButton.dataset.active = replyMode === "llm" ? "true" : "false";
   manualModeButton.dataset.active = replyMode === "manual" ? "true" : "false";
-  llmModeButton.title = "从下一条访客消息开始自动使用 LLM 回复";
-  manualModeButton.title = "从下一条访客消息开始等待人工回复";
+  llmModeButton.title = "只影响下一条新访客消息";
+  manualModeButton.title = "只影响下一条新访客消息；当前问题请点接管当前";
+  takeoverButton.title = "停止当前自动回复，改由人工处理这一条";
 
   if (session.regenerateRequest) {
     activeMetaEl.textContent = `访客请求重新生成 · ${formatTime(session.regenerateRequest.createdAt)}`;
+  } else if (session.canTakeOver) {
+    activeMetaEl.textContent = "LLM 正在处理当前问题 · 可点接管当前";
+  } else if (replyMode === "manual" && session.canReply) {
+    activeMetaEl.textContent = "人工模式 · 当前问题等待你回复";
   } else if (session.isGenerating) {
     activeMetaEl.textContent = "回复正在流式输出到访客端";
   } else if (session.adminTyping) {
@@ -242,7 +253,7 @@ function renderActiveSession(session) {
     activeMetaEl.textContent = `LLM 模式 · ${session.messageCount} 条消息 · 最近更新 ${formatTime(session.updatedAt)}`;
   }
 
-  setComposerEnabled(true, session.canReply);
+  setComposerEnabled(true, session.canReply, session.canTakeOver);
   renderReferencePanel(session);
 
   const signature = JSON.stringify({
@@ -251,6 +262,7 @@ function renderActiveSession(session) {
     generating: session.isGenerating,
     replyMode,
     canReply: session.canReply,
+    canTakeOver: session.canTakeOver,
     draft: session.adminDraft,
     revealed: session.revealed,
     regenerate: session.regenerateRequest?.id || ""
@@ -265,6 +277,10 @@ function renderActiveSession(session) {
   const rows = session.messages.map((message) => createMessageRow(message, session));
   if (session.regenerateRequest) {
     rows.push(createSystemNotice("访客点击了重新生成。你可以基于同一个问题再发一版更像 AI 的回复。"));
+  } else if (session.canTakeOver) {
+    rows.push(createSystemNotice("这一条正在由 LLM 处理。需要人工介入时，点右上角“接管当前”。"));
+  } else if (replyMode === "manual" && session.canReply) {
+    rows.push(createSystemNotice("当前问题已由人工处理。可以采用 LLM 参考，也可以直接改写后发送。"));
   } else if (replyMode === "manual" && !session.adminTyping) {
     rows.push(createSystemNotice("当前是人工模式。从下一条访客消息开始，魔丸会等待你手动发出回复。"));
   } else if (session.adminTyping && !session.isGenerating) {
@@ -285,7 +301,7 @@ function renderNoActiveSession() {
   activeMetaEl.textContent = "打开访客页后，这里会出现新的会话。";
   llmModeButton.dataset.active = "false";
   manualModeButton.dataset.active = "false";
-  setComposerEnabled(false, false);
+  setComposerEnabled(false, false, false);
   renderReferencePanel({ canReply: false, replyMode: "manual", adminDraft: null });
   activeSignature = "";
 
@@ -462,6 +478,22 @@ async function setReplyMode(mode) {
   }
 }
 
+async function takeOverCurrent() {
+  if (!activeSessionId) {
+    return;
+  }
+
+  const response = await fetch(`/api/admin/sessions/${encodeURIComponent(activeSessionId)}/takeover`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}"
+  });
+  const payload = await readPayload(response);
+  if (!response.ok) {
+    throw new Error(payload.error || "接管失败");
+  }
+}
+
 async function requestReference() {
   if (!activeSessionId) {
     return;
@@ -541,6 +573,16 @@ async function changeReplyMode(mode) {
 
 llmModeButton.addEventListener("click", () => changeReplyMode("llm"));
 manualModeButton.addEventListener("click", () => changeReplyMode("manual"));
+
+takeoverButton.addEventListener("click", async () => {
+  takeoverButton.disabled = true;
+  try {
+    await takeOverCurrent();
+    await refreshAll();
+  } catch (error) {
+    activeMetaEl.textContent = error.message;
+  }
+});
 
 useReferenceButton.addEventListener("click", () => {
   if (!activeAdminDraft?.content || replyInput.disabled) {
