@@ -8,11 +8,17 @@ const refreshButton = document.querySelector("#refreshButton");
 const revealButton = document.querySelector("#revealButton");
 const llmModeButton = document.querySelector("#llmModeButton");
 const manualModeButton = document.querySelector("#manualModeButton");
+const referencePanel = document.querySelector("#referencePanel");
+const referenceMetaEl = document.querySelector("#referenceMeta");
+const referenceContentEl = document.querySelector("#referenceContent");
+const useReferenceButton = document.querySelector("#useReferenceButton");
+const refreshReferenceButton = document.querySelector("#refreshReferenceButton");
 const replyForm = document.querySelector("#replyForm");
 const replyInput = document.querySelector("#replyInput");
 const replyButton = document.querySelector("#replyButton");
 const delayToggle = document.querySelector("#delayToggle");
 const delaySelect = document.querySelector("#delaySelect");
+const quickReplyButtons = [...document.querySelectorAll("[data-reply]")];
 
 let sessions = [];
 let activeSessionId = null;
@@ -21,6 +27,8 @@ let typingTimer = null;
 let currentAdmin = null;
 let adminEvents = null;
 let isRefreshing = false;
+let activeAdminDraft = null;
+let activeCanReply = false;
 
 function redirectToLogin() {
   window.location.href = "/admin-login.html";
@@ -52,30 +60,6 @@ function relativeTime(value) {
     return `${Math.floor(seconds / 60)} 分钟前`;
   }
   return `${Math.floor(seconds / 3600)} 小时前`;
-}
-
-function describeAuditLog(log) {
-  if (!log) {
-    return "";
-  }
-
-  const actor = log.actor || "系统";
-  const actionLabels = {
-    admin_login: "登录后台",
-    admin_logout: "退出后台",
-    admin_reply: "发送回复",
-    cleanup_expired_sessions: "清理过期会话",
-    llm_error: "自动回复失败",
-    llm_reply: "自动回复",
-    regenerate_request: "请求重新生成",
-    reveal_prank: "点击摊牌",
-    reply_mode_changed: "切换回复模式",
-    session_created: "创建会话",
-    stop_generation: "停止生成",
-    user_message: "发送消息"
-  };
-  const label = actionLabels[log.action] || log.action;
-  return `${actor} · ${label}`;
 }
 
 function previewText(session) {
@@ -138,10 +122,7 @@ function renderSessionList() {
     const time = document.createElement("span");
     time.textContent = relativeTime(session.updatedAt);
 
-    const operation = document.createElement("span");
-    operation.textContent = describeAuditLog(session.lastAuditLog) || "暂无操作";
-
-    meta.append(count, operation, time);
+    meta.append(count, time);
     button.append(title, preview, meta);
     return button;
   });
@@ -199,9 +180,47 @@ function createSystemNotice(text) {
   return row;
 }
 
-function setComposerEnabled(enabled) {
-  replyInput.disabled = !enabled;
-  replyButton.disabled = !enabled;
+function renderReferencePanel(session) {
+  const draft = session.adminDraft || null;
+  activeAdminDraft = draft;
+
+  const shouldShow = Boolean(session.canReply && (session.replyMode === "manual" || draft));
+  referencePanel.hidden = !shouldShow;
+  if (!shouldShow) {
+    referenceMetaEl.textContent = "等待访客提问";
+    referenceContentEl.textContent = "切到人工后，魔丸会先憋一版草稿给你改。";
+    useReferenceButton.disabled = true;
+    refreshReferenceButton.disabled = true;
+    return;
+  }
+
+  const status = draft?.status || "idle";
+  const canRefresh = session.replyMode === "manual" && session.canReply && status !== "generating";
+  refreshReferenceButton.disabled = !canRefresh;
+  useReferenceButton.disabled = !(status === "complete" && draft?.content);
+
+  if (status === "generating") {
+    referenceMetaEl.textContent = "魔丸正在憋参考稿";
+    referenceContentEl.textContent = "正在生成，等它把这团火捏成一句能发的话。";
+  } else if (status === "complete") {
+    referenceMetaEl.textContent = `已生成 · ${formatTime(draft.updatedAt)}`;
+    referenceContentEl.textContent = draft.content;
+  } else if (status === "error" || status === "unavailable") {
+    referenceMetaEl.textContent = "参考稿没出来";
+    referenceContentEl.textContent = draft.error || "可以刷新再试，或者直接手写。";
+  } else {
+    referenceMetaEl.textContent = "等待生成参考";
+    referenceContentEl.textContent = "点刷新，魔丸先给你一版底稿。";
+  }
+}
+
+function setComposerEnabled(enabled, canReply = false) {
+  activeCanReply = Boolean(enabled && canReply);
+  replyInput.disabled = !activeCanReply;
+  replyButton.disabled = !activeCanReply;
+  quickReplyButtons.forEach((button) => {
+    button.disabled = !activeCanReply;
+  });
   revealButton.disabled = !enabled;
   llmModeButton.disabled = !enabled;
   manualModeButton.disabled = !enabled;
@@ -227,13 +246,18 @@ function renderActiveSession(session) {
     activeMetaEl.textContent = `LLM 模式 · ${session.messageCount} 条消息 · 最近更新 ${formatTime(session.updatedAt)}`;
   }
 
-  setComposerEnabled(true);
+  setComposerEnabled(true, session.canReply);
+  renderReferencePanel(session);
 
   const signature = JSON.stringify({
     ids: session.messages.map((message) => `${message.id}:${message.content}:${message.status}`),
     typing: session.adminTyping,
     generating: session.isGenerating,
     replyMode,
+    canReply: session.canReply,
+    draft: session.adminDraft
+      ? `${session.adminDraft.status}:${session.adminDraft.content}:${session.adminDraft.error || ""}:${session.adminDraft.updatedAt}`
+      : "",
     revealed: session.revealed,
     regenerate: session.regenerateRequest?.id || ""
   });
@@ -267,7 +291,8 @@ function renderNoActiveSession() {
   activeMetaEl.textContent = "打开访客页后，这里会出现新的会话。";
   llmModeButton.dataset.active = "false";
   manualModeButton.dataset.active = "false";
-  setComposerEnabled(false);
+  setComposerEnabled(false, false);
+  renderReferencePanel({ canReply: false, replyMode: "manual", adminDraft: null });
   activeSignature = "";
 
   const empty = document.createElement("div");
@@ -443,6 +468,22 @@ async function setReplyMode(mode) {
   }
 }
 
+async function requestReference() {
+  if (!activeSessionId) {
+    return;
+  }
+
+  const response = await fetch(`/api/admin/sessions/${encodeURIComponent(activeSessionId)}/reference`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}"
+  });
+  const payload = await readPayload(response);
+  if (!response.ok) {
+    throw new Error(payload.error || "参考稿生成失败");
+  }
+}
+
 replyForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const content = replyInput.value.trim();
@@ -459,7 +500,7 @@ replyForm.addEventListener("submit", async (event) => {
   } catch (error) {
     activeMetaEl.textContent = error.message;
   } finally {
-    replyButton.disabled = false;
+    replyButton.disabled = !activeCanReply;
   }
 });
 
@@ -471,7 +512,7 @@ replyInput.addEventListener("keydown", (event) => {
   }
 });
 
-document.querySelectorAll("[data-reply]").forEach((button) => {
+quickReplyButtons.forEach((button) => {
   button.addEventListener("click", () => {
     replyInput.value = `${button.dataset.reply}${replyInput.value ? `\n${replyInput.value}` : ""}`;
     replyInput.focus();
@@ -506,6 +547,28 @@ async function changeReplyMode(mode) {
 
 llmModeButton.addEventListener("click", () => changeReplyMode("llm"));
 manualModeButton.addEventListener("click", () => changeReplyMode("manual"));
+
+useReferenceButton.addEventListener("click", () => {
+  if (!activeAdminDraft?.content || !activeCanReply) {
+    return;
+  }
+
+  replyInput.value = activeAdminDraft.content;
+  replyInput.focus();
+  announceTyping();
+});
+
+refreshReferenceButton.addEventListener("click", async () => {
+  refreshReferenceButton.disabled = true;
+  try {
+    await requestReference();
+    await refreshAll();
+  } catch (error) {
+    activeMetaEl.textContent = error.message;
+  } finally {
+    refreshReferenceButton.disabled = false;
+  }
+});
 
 revealButton.addEventListener("click", async () => {
   if (!activeSessionId) {

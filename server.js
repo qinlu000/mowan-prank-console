@@ -483,6 +483,8 @@ function hydrateSession(row) {
     replyMode: row.manual_next_reply ? "manual" : "llm",
     regenerateRequest: parseJson(row.regenerate_request, null),
     generation: null,
+    referenceGeneration: null,
+    adminDraft: null,
     pendingTimers: new Set(),
     messages: statements.selectMessages.all(row.id).map((messageRow) => ({
       id: messageRow.id,
@@ -568,6 +570,8 @@ function getSession(id, options = {}) {
       replyMode: "llm",
       regenerateRequest: null,
       generation: null,
+      referenceGeneration: null,
+      adminDraft: null,
       pendingTimers: new Set(),
       messages: [
         createMessage(
@@ -672,9 +676,26 @@ function touch(session) {
   broadcastSessionUpdate(session);
 }
 
-function lastAssistantMessage(session) {
+function currentUserTurn(session) {
   for (let index = session.messages.length - 1; index >= 0; index -= 1) {
     const message = session.messages[index];
+    if (message.role === "user") {
+      return { message, index };
+    }
+  }
+  return null;
+}
+
+function replyForUserTurn(session, userIndex) {
+  if (userIndex < 0) {
+    return null;
+  }
+
+  for (let index = userIndex + 1; index < session.messages.length; index += 1) {
+    const message = session.messages[index];
+    if (message.role === "user") {
+      return null;
+    }
     if (message.role === "assistant") {
       return message;
     }
@@ -682,9 +703,67 @@ function lastAssistantMessage(session) {
   return null;
 }
 
+function currentReplyMessage(session) {
+  const turn = currentUserTurn(session);
+  return turn ? replyForUserTurn(session, turn.index) : null;
+}
+
+function currentCompleteReply(session) {
+  const reply = currentReplyMessage(session);
+  return reply && reply.status === "complete" ? reply : null;
+}
+
+function canReplaceCurrentReply(session, reply = currentCompleteReply(session)) {
+  return Boolean(reply && session.regenerateRequest?.previousMessageId === reply.id);
+}
+
+function canCompleteCurrentTurn(session) {
+  const turn = currentUserTurn(session);
+  if (!turn) {
+    return false;
+  }
+
+  const completeReply = currentCompleteReply(session);
+  return !completeReply || canReplaceCurrentReply(session, completeReply);
+}
+
+function currentReplyTargetId(session) {
+  const currentReply = currentReplyMessage(session);
+  if (session.regenerateRequest?.previousMessageId) {
+    return session.regenerateRequest.previousMessageId;
+  }
+  return currentReply?.id || null;
+}
+
+function ensureReplyMessage(session, preferredMessageId = null) {
+  const turn = currentUserTurn(session);
+  if (!turn) {
+    return null;
+  }
+
+  const currentReply = currentReplyMessage(session);
+  const existing = preferredMessageId
+    ? currentReply?.id === preferredMessageId
+      ? currentReply
+      : null
+    : currentReply;
+  if (existing) {
+    existing.content = "";
+    existing.status = "streaming";
+    existing.updatedAt = now();
+    persistMessage(session, existing);
+    return existing;
+  }
+
+  const message = createMessage("assistant", "", { status: "streaming" });
+  session.messages.splice(turn.index + 1, 0, message);
+  persistAllMessages(session);
+  return message;
+}
+
 function canRegenerate(session) {
-  const lastAssistant = lastAssistantMessage(session);
-  return Boolean(lastAssistant && !session.generation && !session.adminTyping);
+  const reply = currentCompleteReply(session);
+  return Boolean(reply && !session.regenerateRequest && !session.generation && !session.adminTyping);
 }
 
 function isVisibleGeneration(generation) {
@@ -696,6 +775,8 @@ function summarizeSession(session) {
   const userMessages = session.messages.filter((message) => message.role === "user");
   const latestAuditLog = serializeAuditLog(statements.selectLatestAuditLogBySession.get(session.id));
   const isGenerating = isVisibleGeneration(session.generation);
+  const completeReply = currentCompleteReply(session);
+  const canReply = canCompleteCurrentTurn(session);
   return {
     id: session.id,
     title: session.title,
@@ -708,6 +789,10 @@ function summarizeSession(session) {
     isGenerating,
     generationType: session.generation?.type || null,
     replyMode: session.replyMode || "llm",
+    canReply,
+    hasFinalReply: Boolean(completeReply && !canReplaceCurrentReply(session, completeReply)),
+    hasPendingQuestion: canReply,
+    adminDraft: session.adminDraft,
     regenerateRequested: Boolean(session.regenerateRequest),
     regenerateRequest: session.regenerateRequest,
     revealed: session.revealed,
@@ -1004,6 +1089,28 @@ function clearGenerationTimer(session) {
   }
 }
 
+function clearReferenceTimer(session, reference = session.referenceGeneration) {
+  if (!reference?.timeout) {
+    return;
+  }
+
+  clearTimeout(reference.timeout);
+  session.pendingTimers.delete(reference.timeout);
+  reference.timeout = null;
+}
+
+function stopReferenceGeneration(session) {
+  if (!session.referenceGeneration) {
+    return false;
+  }
+
+  session.referenceGeneration.stopped = true;
+  session.referenceGeneration.abortController?.abort();
+  clearReferenceTimer(session);
+  session.referenceGeneration = null;
+  return true;
+}
+
 function stopActiveGeneration(session, status = "stopped") {
   if (!session.generation) {
     return false;
@@ -1098,10 +1205,14 @@ function queueStreamStep(session) {
   session.pendingTimers.add(timer);
 }
 
-function startStreamingReply(session, content) {
-  const message = createMessage("assistant", "", { status: "streaming" });
-  session.messages.push(message);
-  persistMessage(session, message);
+function startStreamingReply(session, content, options = {}) {
+  const message = ensureReplyMessage(session, options.messageId || null);
+  if (!message) {
+    session.adminTyping = false;
+    touch(session);
+    return false;
+  }
+
   session.adminTyping = false;
   session.regenerateRequest = null;
   session.generation = {
@@ -1113,16 +1224,27 @@ function startStreamingReply(session, content) {
   };
   touch(session);
   queueStreamStep(session);
+  return true;
 }
 
-function queueReply(session, content, delayMs) {
+function queueReply(session, content, delayMs, options = {}) {
+  const finalReply = currentCompleteReply(session);
+  const messageId = options.messageId || currentReplyTargetId(session);
+  if (!canCompleteCurrentTurn(session)) {
+    return false;
+  }
+  if (finalReply && finalReply.id !== messageId) {
+    return false;
+  }
+
   stopActiveGeneration(session, "stopped");
+  stopReferenceGeneration(session);
+  session.adminDraft = null;
   session.adminTyping = true;
   touch(session);
 
   if (delayMs <= 0) {
-    startStreamingReply(session, content);
-    return;
+    return startStreamingReply(session, content, { messageId });
   }
 
   const timer = setTimeout(() => {
@@ -1131,17 +1253,18 @@ function queueReply(session, content, delayMs) {
       return;
     }
     session.generation = null;
-    startStreamingReply(session, content);
+    startStreamingReply(session, content, { messageId });
   }, delayMs);
 
   session.generation = {
     type: "delay",
-    messageId: null,
+    messageId,
     target: content,
     index: 0,
     timer
   };
   session.pendingTimers.add(timer);
+  return true;
 }
 
 function clearManualTyping(session) {
@@ -1312,10 +1435,22 @@ function startLlmReply(session, options = {}) {
     return false;
   }
 
+  const targetMessageId = options.targetMessageId || currentReplyTargetId(session);
+  const finalReply = currentCompleteReply(session);
+  if (!canCompleteCurrentTurn(session)) {
+    return false;
+  }
+  if (finalReply && finalReply.id !== targetMessageId) {
+    return false;
+  }
+
+  stopReferenceGeneration(session);
+  session.adminDraft = null;
   const abortController = new AbortController();
   const generation = {
     type: "ai",
     messageId: null,
+    targetMessageId,
     abortController,
     excludeMessageId: options.excludeMessageId || null,
     reason: options.reason || "auto",
@@ -1343,7 +1478,10 @@ function startLlmReply(session, options = {}) {
       }
 
       clearGenerationTimer(session);
-      startStreamingReply(session, content);
+      const started = startStreamingReply(session, content, { messageId: generation.targetMessageId });
+      if (!started) {
+        return;
+      }
       recordAuditLog("llm_reply", {
         sessionId: session.id,
         actor: "魔丸",
@@ -1379,7 +1517,125 @@ function startLlmReply(session, options = {}) {
             : null
         }
       });
-      startStreamingReply(session, config.llmFallbackReply);
+      startStreamingReply(session, config.llmFallbackReply, { messageId: generation.targetMessageId });
+    });
+
+  return true;
+}
+
+function startLlmReference(session, options = {}) {
+  const turn = currentUserTurn(session);
+  if (!turn || !canCompleteCurrentTurn(session)) {
+    return false;
+  }
+
+  const forUserMessageId = turn.message.id;
+  const existingDraft = session.adminDraft;
+  if (
+    !options.force &&
+    existingDraft?.forUserMessageId === forUserMessageId &&
+    ["generating", "complete"].includes(existingDraft.status)
+  ) {
+    return true;
+  }
+
+  stopReferenceGeneration(session);
+
+  if (!config.llmEnabled) {
+    session.adminDraft = {
+      status: "unavailable",
+      content: "",
+      error: "LLM 暂未配置，先手动写一条。",
+      forUserMessageId,
+      updatedAt: now()
+    };
+    touch(session);
+    return false;
+  }
+
+  const abortController = new AbortController();
+  const reference = {
+    type: "reference",
+    abortController,
+    excludeMessageId: currentReplyMessage(session)?.id || null,
+    reason: options.reason || "manual_reference",
+    startedAt: now(),
+    stopped: false,
+    timedOut: false,
+    timeout: null,
+    forUserMessageId
+  };
+
+  const timeout = setTimeout(() => {
+    reference.timedOut = true;
+    abortController.abort();
+  }, config.llmTimeoutMs);
+
+  reference.timeout = timeout;
+  session.pendingTimers.add(timeout);
+  session.referenceGeneration = reference;
+  session.adminDraft = {
+    status: "generating",
+    content: "",
+    error: null,
+    forUserMessageId,
+    updatedAt: now()
+  };
+  touch(session);
+
+  requestLlmCompletionWithRetry(session, reference)
+    .then((content) => {
+      if (session.referenceGeneration !== reference) {
+        return;
+      }
+
+      clearReferenceTimer(session, reference);
+      session.referenceGeneration = null;
+      session.adminDraft = {
+        status: "complete",
+        content,
+        error: null,
+        forUserMessageId,
+        updatedAt: now()
+      };
+      recordAuditLog("llm_reference", {
+        sessionId: session.id,
+        actor: "魔丸",
+        detail: {
+          model: config.llmModel,
+          reason: reference.reason,
+          attempts: reference.attempts || 1,
+          length: content.length
+        }
+      });
+      touch(session);
+    })
+    .catch((error) => {
+      if (session.referenceGeneration !== reference || reference.stopped) {
+        return;
+      }
+
+      clearReferenceTimer(session, reference);
+      session.referenceGeneration = null;
+      session.adminDraft = {
+        status: "error",
+        content: "",
+        error: reference.timedOut ? "LLM 参考生成超时了，刷新再试。" : "LLM 参考生成失败，可以刷新再试。",
+        forUserMessageId,
+        updatedAt: now()
+      };
+      recordAuditLog("llm_reference_error", {
+        sessionId: session.id,
+        actor: "魔丸",
+        detail: {
+          model: config.llmModel,
+          reason: reference.reason,
+          attempts: reference.attempts || 1,
+          timedOut: reference.timedOut,
+          message: error.message
+        }
+      });
+      touch(session);
     });
 
   return true;
@@ -1571,6 +1827,8 @@ async function postChatMessage(request, reply) {
   }
 
   stopActiveGeneration(session, "stopped");
+  stopReferenceGeneration(session);
+  session.adminDraft = null;
   const message = createMessage("user", content);
   session.messages.push(message);
   persistMessage(session, message);
@@ -1582,7 +1840,12 @@ async function postChatMessage(request, reply) {
   touch(session);
   recordAuditLog("user_message", { sessionId: session.id, actor: "visitor" });
   if (session.replyMode !== "manual") {
-    startLlmReply(session, { reason: "user_message" });
+    const started = startLlmReply(session, { reason: "user_message" });
+    if (!started) {
+      queueReply(session, config.llmFallbackReply, 0);
+    }
+  } else {
+    startLlmReference(session, { reason: "user_message_reference" });
   }
   sendJson(reply, 201, publicSession(session));
 }
@@ -1610,23 +1873,34 @@ async function requestRegenerate(request, reply) {
 
   session.lastSeenAt = now();
   persistSession(session);
-  const lastAssistant = lastAssistantMessage(session);
-  if (!lastAssistant) {
+  const currentReply = currentCompleteReply(session);
+  if (!currentReply) {
     sendError(reply, 400, "还没有可重新生成的回复");
     return;
   }
 
   stopActiveGeneration(session, "stopped");
+  stopReferenceGeneration(session);
+  session.adminDraft = null;
   session.regenerateRequest = {
     id: randomUUID(),
     createdAt: now(),
-    previousMessageId: lastAssistant.id
+    previousMessageId: currentReply.id
   };
   session.adminTyping = true;
   touch(session);
   recordAuditLog("regenerate_request", { sessionId: session.id, actor: "visitor" });
   if (session.replyMode !== "manual") {
-    startLlmReply(session, { reason: "regenerate", excludeMessageId: lastAssistant.id });
+    const started = startLlmReply(session, {
+      reason: "regenerate",
+      excludeMessageId: currentReply.id,
+      targetMessageId: currentReply.id
+    });
+    if (!started) {
+      queueReply(session, config.llmFallbackReply, 0, { messageId: currentReply.id });
+    }
+  } else {
+    startLlmReference(session, { reason: "regenerate_reference", force: true });
   }
   sendJson(reply, 200, { ok: true, session: publicSession(session) });
 }
@@ -1689,11 +1963,54 @@ async function setReplyMode(request, reply) {
     actor: request.admin?.username || "admin",
     detail: { mode }
   });
-  touch(session);
+
+  if (mode === "manual" && canCompleteCurrentTurn(session)) {
+    stopActiveGeneration(session, "stopped");
+    session.adminTyping = true;
+    startLlmReference(session, { reason: "mode_switch_reference", force: true });
+  } else if (mode === "llm" && canCompleteCurrentTurn(session)) {
+    const targetMessageId = currentReplyTargetId(session);
+    stopReferenceGeneration(session);
+    session.adminDraft = null;
+    const started = startLlmReply(session, {
+      reason: "mode_switch_llm",
+      excludeMessageId: currentReplyMessage(session)?.id || null,
+      targetMessageId
+    });
+    if (!started) {
+      queueReply(session, config.llmFallbackReply, 0, { messageId: targetMessageId });
+    }
+  } else {
+    touch(session);
+  }
   sendJson(reply, 200, {
     ok: true,
     replyMode: session.replyMode,
     session: summarizeSession(session)
+  });
+}
+
+async function requestAdminReference(request, reply) {
+  const session = sessionFromRequest(request, reply);
+  if (!session) {
+    return;
+  }
+
+  if (!canCompleteCurrentTurn(session)) {
+    sendError(reply, 409, "当前没有可接管的问题，或者这个问题已经回复过了。");
+    return;
+  }
+
+  const started = startLlmReference(session, { reason: "admin_reference", force: true });
+  if (!started && session.adminDraft?.status !== "unavailable") {
+    sendError(reply, 503, "LLM 参考暂时生成不了。");
+    return;
+  }
+
+  sendJson(reply, started ? 202 : 200, {
+    ok: true,
+    generating: started,
+    session: adminSessionDetail(session)
   });
 }
 
@@ -1716,7 +2033,11 @@ async function sendAdminReply(request, reply) {
   }
 
   const delayMs = Math.max(0, Math.min(Number(body.delayMs || 0), 8000));
-  queueReply(session, content, delayMs);
+  const queued = queueReply(session, content, delayMs, { messageId: currentReplyTargetId(session) });
+  if (!queued) {
+    sendError(reply, 409, "这个问题已经有回复了，不能再补第二条。");
+    return;
+  }
   recordAuditLog("admin_reply", {
     sessionId: session.id,
     actor: request.admin?.username || "admin",
@@ -1738,6 +2059,8 @@ async function revealPrank(request, reply) {
   }
 
   stopActiveGeneration(session, "stopped");
+  stopReferenceGeneration(session);
+  session.adminDraft = null;
   const message = createMessage(
     "assistant",
     "我摊牌了，我可是魔丸。你以为刚才是在和大模型聊天？其实一直有人在后台手动接招。欢迎来到魔丸整蛊现场。"
@@ -1773,6 +2096,7 @@ function registerRoutes(app) {
   app.get("/api/admin/sessions/:sessionId", { preHandler: requireAdmin }, getAdminSession);
   app.post("/api/admin/sessions/:sessionId/typing", { preHandler: requireAdmin }, setAdminTyping);
   app.post("/api/admin/sessions/:sessionId/reply-mode", { preHandler: requireAdmin }, setReplyMode);
+  app.post("/api/admin/sessions/:sessionId/reference", { preHandler: requireAdmin }, requestAdminReference);
   app.post("/api/admin/sessions/:sessionId/reply", { preHandler: requireAdmin }, sendAdminReply);
   app.post("/api/admin/sessions/:sessionId/reveal", { preHandler: requireAdmin }, revealPrank);
 }

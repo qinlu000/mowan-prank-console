@@ -52,6 +52,20 @@
 
         <section class="admin-messages" id="adminMessages" aria-live="polite"></section>
 
+        <section class="reference-panel" id="referencePanel" hidden>
+          <div class="reference-header">
+            <div>
+              <div class="reference-title">LLM 参考</div>
+              <div class="muted" id="referenceMeta">等待访客提问</div>
+            </div>
+            <div class="reference-actions">
+              <button class="ghost-button" id="useReferenceButton" type="button" disabled>采用</button>
+              <button class="ghost-button" id="refreshReferenceButton" type="button" disabled>刷新</button>
+            </div>
+          </div>
+          <div class="reference-content" id="referenceContent">切到人工后，魔丸会先憋一版草稿给你改。</div>
+        </section>
+
         <section class="quick-replies" aria-label="快捷回复">
           <button type="button" data-reply="短答案：">短答案</button>
           <button type="button" data-reply="可以分成三点看：&#10;&#10;1. &#10;2. &#10;3. ">分点回答</button>
