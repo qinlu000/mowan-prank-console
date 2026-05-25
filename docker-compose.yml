@@ -18,6 +18,14 @@ services:
       LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-900}
       LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-45000}
       LLM_RETRY_COUNT: ${LLM_RETRY_COUNT:-2}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      QWEN_TTS_ENABLED: ${QWEN_TTS_ENABLED:-true}
+      QWEN_TTS_REGION: ${QWEN_TTS_REGION:-beijing}
+      QWEN_TTS_CLONE_MODEL: ${QWEN_TTS_CLONE_MODEL:-qwen3-tts-vc-2026-01-22}
+      QWEN_TTS_MODEL: ${QWEN_TTS_MODEL:-qwen3-tts-vc-2026-01-22}
+      QWEN_TTS_PREFERRED_NAME: ${QWEN_TTS_PREFERRED_NAME:-mowan}
+      QWEN_TTS_VOICE: ${QWEN_TTS_VOICE:-}
+      AUDIO_DIR: ${AUDIO_DIR:-/data/audio}
     volumes:
       - mowan_data:/data
     healthcheck:
