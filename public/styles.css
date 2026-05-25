@@ -102,6 +102,8 @@ textarea:disabled {
 .new-chat-button,
 .model-pill,
 .conversation-item,
+.conversation-select,
+.conversation-delete,
 .suggestions button,
 .quick-replies button {
   min-height: 36px;
@@ -131,6 +133,8 @@ textarea:disabled {
 .new-chat-button:hover,
 .model-pill:hover,
 .conversation-item:hover,
+.conversation-select:hover,
+.conversation-delete:hover,
 .suggestions button:hover,
 .quick-replies button:hover {
   background: var(--surface-hover);
@@ -325,12 +329,40 @@ input:focus {
 .conversation-item {
   width: 100%;
   display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  color: #333333;
+  text-align: left;
+}
+
+.conversation-select {
+  width: 100%;
+  display: grid;
   grid-template-columns: 14px 1fr;
   align-items: center;
   gap: 9px;
-  padding: 8px 10px;
-  color: #333333;
+  padding: 6px 8px;
   text-align: left;
+}
+
+.conversation-delete {
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
+  color: var(--muted);
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.conversation-delete:hover {
+  color: var(--danger);
+  background: rgba(194, 65, 75, 0.08);
+}
+
+.conversation-delete:disabled {
+  opacity: 0.35;
 }
 
 .conversation-copy,

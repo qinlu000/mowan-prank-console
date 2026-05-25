@@ -385,6 +385,8 @@ const statements = {
   `),
   selectSessions: db.prepare("SELECT * FROM sessions ORDER BY updated_at DESC"),
   selectMessages: db.prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY position ASC"),
+  deleteSession: db.prepare("DELETE FROM sessions WHERE id = ?"),
+  deleteAuditLogsBySession: db.prepare("DELETE FROM audit_logs WHERE session_id = ?"),
   deleteExpiredSessions: db.prepare("DELETE FROM sessions WHERE updated_at < ?"),
   selectVisitorDevice: db.prepare("SELECT * FROM visitor_devices WHERE token = ?"),
   upsertVisitorDevice: db.prepare(`
@@ -741,6 +743,60 @@ function createVisitorConversation(visitorLabel) {
   return getVisitorConversation(visitorLabel, conversationIndex);
 }
 
+function deleteAudioFile(audioFile) {
+  if (!audioFile) {
+    return;
+  }
+
+  const filePath = path.resolve(config.audioDir, path.basename(audioFile));
+  if (!filePath.startsWith(`${config.audioDir}${path.sep}`)) {
+    return;
+  }
+
+  fs.promises.unlink(filePath).catch((error) => {
+    if (error.code !== "ENOENT") {
+      recordAuditLog("audio_delete_error", {
+        detail: { file: path.basename(audioFile), message: error.message }
+      });
+    }
+  });
+}
+
+function disposeSessionWork(session) {
+  session.generation?.abortController?.abort();
+  session.referenceGeneration?.abortController?.abort();
+  clearJobTimers(session, session.generation);
+  clearJobTimers(session, session.referenceGeneration);
+  for (const timer of session.pendingTimers) {
+    clearTimeout(timer);
+  }
+  session.pendingTimers.clear();
+  session.generation = null;
+  session.referenceGeneration = null;
+  session.adminTyping = false;
+}
+
+function deleteVisitorSession(session, actor = "visitor") {
+  const audioFiles = new Set(session.messages.map((message) => message.audioFile).filter(Boolean));
+  disposeSessionWork(session);
+  sessions.delete(session.id);
+  statements.deleteAuditLogsBySession.run(session.id);
+  statements.deleteSession.run(session.id);
+  for (const audioFile of audioFiles) {
+    deleteAudioFile(audioFile);
+  }
+  recordAuditLog("session_deleted", {
+    actor,
+    detail: {
+      sessionId: session.id,
+      visitorLabel: session.visitorLabel,
+      conversationIndex: session.conversationIndex || 1,
+      messageCount: session.messages.length
+    }
+  });
+  broadcastSessionDeleted(session.id);
+}
+
 function touch(session) {
   session.updatedAt = now();
   persistSession(session);
@@ -977,6 +1033,27 @@ function broadcastSessionUpdate(session) {
   for (const client of sseClients) {
     if (client.type === "chat" && client.sessionId === session.id) {
       writeSse(client, "session", chatPayload);
+    } else if (client.type === "admin") {
+      writeSse(client, "admin", adminPayload);
+    }
+  }
+}
+
+function broadcastSessionDeleted(sessionId) {
+  if (!sseClients.size) {
+    return;
+  }
+
+  const adminPayload = {
+    changedSessionId: sessionId,
+    deletedSessionId: sessionId,
+    sessions: adminSessionsSnapshot(),
+    session: null
+  };
+
+  for (const client of sseClients) {
+    if (client.type === "chat" && client.sessionId === sessionId) {
+      writeSse(client, "deleted", { sessionId });
     } else if (client.type === "admin") {
       writeSse(client, "admin", adminPayload);
     }
@@ -1429,6 +1506,10 @@ function maybeGenerateMessageAudio(session, message) {
   requestQwenTts(message.content)
     .then((audio) => saveQwenAudio(audio, message.id))
     .then((fileName) => {
+      if (sessions.get(session.id) !== session) {
+        deleteAudioFile(fileName);
+        return;
+      }
       const current = session.messages.find((item) => item.id === message.id);
       if (!current) {
         return;
@@ -1447,6 +1528,9 @@ function maybeGenerateMessageAudio(session, message) {
       touch(session);
     })
     .catch((error) => {
+      if (sessions.get(session.id) !== session) {
+        return;
+      }
       const current = session.messages.find((item) => item.id === message.id);
       if (!current) {
         return;
@@ -2087,7 +2171,7 @@ function bindVisitorDevice(request, reply, visitorLabel) {
 
   statements.upsertVisitorDevice.run(token, visitorKey, visitorLabel, timestamp, timestamp);
   setVisitorDeviceCookie(reply, token);
-  return { ok: true, visitorKey, token };
+  return { ok: true, visitorKey, visitorLabel, token };
 }
 
 async function identifyVisitor(request, reply) {
@@ -2158,6 +2242,61 @@ async function createVisitorConversationRoute(request, reply) {
   }
 
   sendJson(reply, 201, publicVisitorState(visitorLabel, session));
+}
+
+async function deleteVisitorConversationRoute(request, reply) {
+  const body = requestBody(request);
+  const visitorLabel = normalizeVisitorLabel(body.visitorId || body.id);
+  if (!visitorLabel) {
+    sendError(reply, 400, "请输入访客代号");
+    return;
+  }
+
+  if (visitorLabel.length > 40) {
+    sendError(reply, 400, "访客代号最多 40 个字符");
+    return;
+  }
+
+  const device = bindVisitorDevice(request, reply, visitorLabel);
+  if (!device.ok) {
+    sendJson(reply, device.status, {
+      error: device.error,
+      visitor: { label: device.visitorLabel }
+    });
+    return;
+  }
+
+  const targetSessionId = String(request.params.sessionId || "").trim();
+  if (!isValidSessionId(targetSessionId)) {
+    sendError(reply, 400, "会话 ID 无效");
+    return;
+  }
+
+  const session = sessions.get(targetSessionId);
+  if (!session || session.visitorKey !== device.visitorKey) {
+    sendError(reply, 404, "对话不存在");
+    return;
+  }
+
+  const deletedIndex = session.conversationIndex || 1;
+  const requestedActiveSessionId = String(body.activeSessionId || "").trim();
+  const requestedActiveSession =
+    requestedActiveSessionId && requestedActiveSessionId !== targetSessionId
+      ? sessions.get(requestedActiveSessionId)
+      : null;
+  deleteVisitorSession(session, device.visitorLabel || visitorLabel);
+
+  const remaining = getVisitorSessions(device.visitorKey);
+  let activeSession =
+    requestedActiveSession?.visitorKey === device.visitorKey ? requestedActiveSession : null;
+  if (!activeSession) {
+    activeSession =
+      remaining.find((item) => (item.conversationIndex || 1) > deletedIndex) ||
+      remaining[remaining.length - 1] ||
+      ensureFirstVisitorConversation(device.visitorLabel || visitorLabel);
+  }
+
+  sendJson(reply, 200, publicVisitorState(device.visitorLabel || visitorLabel, activeSession));
 }
 
 async function streamChatEvents(request, reply) {
@@ -2466,6 +2605,7 @@ function registerRoutes(app) {
 
   app.post("/api/visitor/identify", identifyVisitor);
   app.post("/api/visitor/conversations", createVisitorConversationRoute);
+  app.delete("/api/visitor/conversations/:sessionId", deleteVisitorConversationRoute);
   app.get("/api/chat/:sessionId", getChatSession);
   app.get("/api/chat/:sessionId/events", streamChatEvents);
   app.post("/api/chat/:sessionId/messages", postChatMessage);

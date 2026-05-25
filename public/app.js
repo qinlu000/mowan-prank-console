@@ -30,6 +30,7 @@ let isIdentifying = false;
 let latestSession = null;
 let eventSource = null;
 const playedAudioUrls = new Set();
+const deletingConversationIds = new Set();
 
 for (const key of legacyStorageKeys) {
   localStorage.removeItem(key);
@@ -84,8 +85,11 @@ function renderConversationNav() {
   }
 
   const items = visitorSessions.map((session) => {
+    const item = document.createElement("div");
+    item.className = `conversation-item${session.id === sessionId ? " active" : ""}`;
+
     const button = document.createElement("button");
-    button.className = `conversation-item${session.id === sessionId ? " active" : ""}`;
+    button.className = "conversation-select";
     button.type = "button";
     button.addEventListener("click", () => selectConversation(session.id));
 
@@ -105,8 +109,18 @@ function renderConversationNav() {
     preview.textContent = `${conversationPreview(session)} · ${relativeTime(session.updatedAt)}`;
 
     content.append(title, preview);
+    const deleteButton = document.createElement("button");
+    deleteButton.className = "conversation-delete";
+    deleteButton.type = "button";
+    deleteButton.textContent = "×";
+    deleteButton.title = `删除对话 ${session.conversationIndex || 1}`;
+    deleteButton.setAttribute("aria-label", `删除对话 ${session.conversationIndex || 1}`);
+    deleteButton.disabled = deletingConversationIds.has(session.id);
+    deleteButton.addEventListener("click", () => deleteConversation(session.id));
+
     button.append(dot, content);
-    return button;
+    item.append(button, deleteButton);
+    return item;
   });
 
   conversationNav.replaceChildren(...items);
@@ -219,6 +233,49 @@ async function createConversation() {
     statusEl.textContent = error.message;
   } finally {
     setChatReady(Boolean(sessionId));
+  }
+}
+
+async function deleteConversation(targetSessionId) {
+  if (!visitorId || !targetSessionId || deletingConversationIds.has(targetSessionId)) {
+    return;
+  }
+
+  const target = visitorSessions.find((session) => session.id === targetSessionId);
+  const label = `对话 ${target?.conversationIndex || ""}`.trim();
+  if (!window.confirm(`删除${label}？这会清空里面的聊天记录。`)) {
+    return;
+  }
+
+  deletingConversationIds.add(targetSessionId);
+  renderConversationNav();
+  statusEl.textContent = "正在删除";
+
+  try {
+    const response = await fetch(`/api/visitor/conversations/${encodeURIComponent(targetSessionId)}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ visitorId, activeSessionId: sessionId })
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "删除对话失败");
+    }
+
+    deletingConversationIds.delete(targetSessionId);
+    applyVisitorPayload(payload);
+    lastRenderSignature = "";
+    input.value = "";
+    input.style.height = "auto";
+    render(payload.session);
+    connectEventStream();
+    input.focus();
+  } catch (error) {
+    statusEl.textContent = error.message;
+  } finally {
+    deletingConversationIds.delete(targetSessionId);
+    setChatReady(Boolean(sessionId));
+    renderConversationNav();
   }
 }
 
@@ -407,6 +464,15 @@ function connectEventStream() {
     if (payload.session) {
       statusEl.textContent = "在线";
       render(payload.session);
+    }
+  });
+  eventSource.addEventListener("deleted", () => {
+    if (visitorId) {
+      localStorage.removeItem(sessionStorageKey);
+      sessionId = "";
+      identifyVisitor(visitorId);
+    } else {
+      showVisitorGate();
     }
   });
   eventSource.addEventListener("error", () => {

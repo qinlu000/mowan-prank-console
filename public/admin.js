@@ -393,6 +393,9 @@ async function refreshAll() {
 function applyAdminEvent(payload) {
   if (Array.isArray(payload.sessions)) {
     sessions = payload.sessions;
+    if (payload.deletedSessionId && activeSessionId === payload.deletedSessionId) {
+      activeSessionId = sessions[0]?.id || "";
+    }
     if (!activeSessionId && sessions.length) {
       activeSessionId = sessions[0].id;
     }
