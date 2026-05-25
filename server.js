@@ -36,7 +36,16 @@ const config = {
   llmTimeoutMs: Number(process.env.LLM_TIMEOUT_MS || 45000),
   llmRetryCount: Number(process.env.LLM_RETRY_COUNT || 2),
   llmFallbackReply:
-    process.env.LLM_FALLBACK_REPLY || "我刚刚有点卡住了。你换个问法再发我一次，我继续接。"
+    process.env.LLM_FALLBACK_REPLY || "我刚刚有点卡住了。你换个问法再发我一次，我继续接。",
+  dashScopeApiKey: process.env.DASHSCOPE_API_KEY || process.env.QWEN_TTS_API_KEY || "",
+  qwenTtsRegion: process.env.QWEN_TTS_REGION || "beijing",
+  qwenTtsModel: process.env.QWEN_TTS_MODEL || process.env.QWEN_TTS_CLONE_MODEL || "qwen3-tts-vc-2026-01-22",
+  qwenTtsVoice: process.env.QWEN_TTS_VOICE || "",
+  qwenTtsEnabled:
+    process.env.QWEN_TTS_ENABLED !== "false" &&
+    Boolean(process.env.DASHSCOPE_API_KEY || process.env.QWEN_TTS_API_KEY) &&
+    Boolean(process.env.QWEN_TTS_VOICE),
+  audioDir: path.resolve(__dirname, process.env.AUDIO_DIR || "data/audio")
 };
 
 const newVisitorTitle = "新访客";
@@ -50,6 +59,11 @@ const mimeTypes = new Map([
   [".js", "text/javascript; charset=utf-8"],
   [".json", "application/json; charset=utf-8"],
   [".svg", "image/svg+xml; charset=utf-8"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".mp3", "audio/mpeg"],
+  [".wav", "audio/wav"],
+  [".m4a", "audio/mp4"],
   [".ico", "image/x-icon"]
 ]);
 
@@ -180,6 +194,7 @@ function createDatabase() {
   if (databasePath !== ":memory:") {
     fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   }
+  fs.mkdirSync(config.audioDir, { recursive: true });
 
   const database = new DatabaseSync(databasePath);
   database.exec(`
@@ -237,6 +252,11 @@ function createDatabase() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       status TEXT NOT NULL,
+      audio_file TEXT,
+      audio_status TEXT,
+      audio_error TEXT,
+      audio_created_at TEXT,
+      audio_allowed INTEGER NOT NULL DEFAULT 0,
       position INTEGER NOT NULL,
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
@@ -264,6 +284,11 @@ function createDatabase() {
   ensureColumn(database, "sessions", "visitor_label", "TEXT");
   ensureColumn(database, "sessions", "conversation_index", "INTEGER NOT NULL DEFAULT 1");
   ensureColumn(database, "sessions", "manual_next_reply", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "messages", "audio_file", "TEXT");
+  ensureColumn(database, "messages", "audio_status", "TEXT");
+  ensureColumn(database, "messages", "audio_error", "TEXT");
+  ensureColumn(database, "messages", "audio_created_at", "TEXT");
+  ensureColumn(database, "messages", "audio_allowed", "INTEGER NOT NULL DEFAULT 0");
   database.prepare("UPDATE sessions SET conversation_index = 1 WHERE conversation_index IS NULL").run();
   database.prepare("DELETE FROM sessions WHERE visitor_label IS NULL OR visitor_label = ''").run();
   database
@@ -319,12 +344,17 @@ const statements = {
   `),
   upsertMessage: db.prepare(`
     INSERT INTO messages (
-      id, session_id, role, content, created_at, updated_at, status, position
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      id, session_id, role, content, created_at, updated_at, status, audio_file, audio_status, audio_error, audio_created_at, audio_allowed, position
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       content = excluded.content,
       updated_at = excluded.updated_at,
       status = excluded.status,
+      audio_file = excluded.audio_file,
+      audio_status = excluded.audio_status,
+      audio_error = excluded.audio_error,
+      audio_created_at = excluded.audio_created_at,
+      audio_allowed = excluded.audio_allowed,
       position = excluded.position
   `),
   selectSessions: db.prepare("SELECT * FROM sessions ORDER BY updated_at DESC"),
@@ -370,7 +400,12 @@ function serializeMessage(message) {
     content: message.content,
     createdAt: message.createdAt,
     updatedAt: message.updatedAt || message.createdAt,
-    status: message.status || "complete"
+    status: message.status || "complete",
+    audioStatus: message.audioStatus || null,
+    audioUrl: message.audioFile ? `/api/audio/${encodeURIComponent(path.basename(message.audioFile))}` : null,
+    audioError: message.audioError || null,
+    audioCreatedAt: message.audioCreatedAt || null,
+    audioAllowed: Boolean(message.audioAllowed)
   };
 }
 
@@ -447,6 +482,11 @@ function persistMessage(session, message) {
     message.createdAt,
     message.updatedAt || message.createdAt,
     message.status || "complete",
+    message.audioFile || null,
+    message.audioStatus || null,
+    message.audioError || null,
+    message.audioCreatedAt || null,
+    message.audioAllowed ? 1 : 0,
     position < 0 ? session.messages.length : position
   );
 }
@@ -492,7 +532,12 @@ function hydrateSession(row) {
       content: messageRow.content,
       createdAt: messageRow.created_at,
       updatedAt: messageRow.updated_at,
-      status: messageRow.status
+      status: messageRow.status,
+      audioFile: messageRow.audio_file,
+      audioStatus: messageRow.audio_status,
+      audioError: messageRow.audio_error,
+      audioCreatedAt: messageRow.audio_created_at,
+      audioAllowed: Boolean(messageRow.audio_allowed)
     }))
   };
 }
@@ -1040,6 +1085,163 @@ async function sendStatic(urlPath, reply) {
   }
 }
 
+async function sendAudioFile(request, reply) {
+  const fileName = String(request.params.fileName || "");
+  if (!/^[a-zA-Z0-9_-]+\.(mp3|wav|m4a)$/i.test(fileName)) {
+    sendError(reply, 404, "文件不存在");
+    return;
+  }
+
+  const filePath = path.resolve(config.audioDir, fileName);
+  if (!filePath.startsWith(`${config.audioDir}${path.sep}`)) {
+    sendError(reply, 404, "文件不存在");
+    return;
+  }
+
+  try {
+    const data = await fs.promises.readFile(filePath);
+    const ext = path.extname(filePath).toLowerCase();
+    reply
+      .code(200)
+      .type(mimeTypes.get(ext) || "application/octet-stream")
+      .header("Cache-Control", "public, max-age=31536000, immutable")
+      .send(data);
+  } catch (error) {
+    sendError(reply, error.code === "ENOENT" ? 404 : 500, "文件不存在");
+  }
+}
+
+function qwenTtsGenerationUrl() {
+  const host =
+    String(config.qwenTtsRegion).toLowerCase() === "singapore"
+      ? "https://dashscope-intl.aliyuncs.com"
+      : "https://dashscope.aliyuncs.com";
+  return `${host}/api/v1/services/aigc/multimodal-generation/generation`;
+}
+
+function audioExtensionFromResponse(response, audioUrl) {
+  const type = String(response.headers.get("content-type") || "").toLowerCase();
+  if (type.includes("mpeg") || type.includes("mp3")) {
+    return ".mp3";
+  }
+  if (type.includes("mp4") || type.includes("m4a")) {
+    return ".m4a";
+  }
+  const ext = path.extname(new URL(audioUrl).pathname).toLowerCase();
+  return mimeTypes.has(ext) ? ext : ".wav";
+}
+
+async function requestQwenTts(text) {
+  const response = await fetch(qwenTtsGenerationUrl(), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${config.dashScopeApiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: config.qwenTtsModel,
+      input: {
+        text,
+        voice: config.qwenTtsVoice
+      }
+    })
+  });
+
+  const responseText = await response.text();
+  const payload = parseJson(responseText, {});
+  if (!response.ok) {
+    const message = payload?.message || payload?.error?.message || responseText || response.statusText;
+    const error = new Error(`DashScope ${response.status}: ${message}`);
+    error.statusCode = response.status;
+    throw error;
+  }
+
+  const audioUrl = payload?.output?.audio?.url || payload?.output?.url || payload?.url;
+  if (!audioUrl) {
+    throw new Error("DashScope TTS did not return an audio URL.");
+  }
+  return audioUrl;
+}
+
+async function saveRemoteAudio(audioUrl, messageId) {
+  const response = await fetch(audioUrl);
+  if (!response.ok) {
+    throw new Error(`Audio download ${response.status}: ${response.statusText}`);
+  }
+
+  const ext = audioExtensionFromResponse(response, audioUrl);
+  const fileName = `${messageId}${ext}`;
+  const filePath = path.join(config.audioDir, fileName);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  await fs.promises.mkdir(config.audioDir, { recursive: true });
+  await fs.promises.writeFile(filePath, bytes);
+  return fileName;
+}
+
+function shouldGenerateAudio(message) {
+  return Boolean(
+    config.qwenTtsEnabled &&
+      message.role === "assistant" &&
+      message.status === "complete" &&
+      message.audioAllowed &&
+      message.content.trim() &&
+      !message.audioFile &&
+      message.audioStatus !== "generating"
+  );
+}
+
+function maybeGenerateMessageAudio(session, message) {
+  if (!shouldGenerateAudio(message)) {
+    return false;
+  }
+
+  message.audioStatus = "generating";
+  message.audioError = null;
+  message.audioCreatedAt = null;
+  message.updatedAt = now();
+  persistMessage(session, message);
+  touch(session);
+
+  requestQwenTts(message.content)
+    .then((audioUrl) => saveRemoteAudio(audioUrl, message.id))
+    .then((fileName) => {
+      const current = session.messages.find((item) => item.id === message.id);
+      if (!current) {
+        return;
+      }
+      current.audioFile = fileName;
+      current.audioStatus = "complete";
+      current.audioError = null;
+      current.audioCreatedAt = now();
+      current.updatedAt = now();
+      persistMessage(session, current);
+      recordAuditLog("tts_audio_created", {
+        sessionId: session.id,
+        actor: "魔丸",
+        detail: { model: config.qwenTtsModel, messageId: current.id }
+      });
+      touch(session);
+    })
+    .catch((error) => {
+      const current = session.messages.find((item) => item.id === message.id);
+      if (!current) {
+        return;
+      }
+      current.audioStatus = "error";
+      current.audioError = error.message;
+      current.updatedAt = now();
+      persistMessage(session, current);
+      recordAuditLog("tts_audio_error", {
+        sessionId: session.id,
+        actor: "魔丸",
+        detail: { model: config.qwenTtsModel, messageId: current.id, message: error.message }
+      });
+      touch(session);
+    });
+
+  return true;
+}
+
 function clearJobTimers(session, job) {
   for (const key of ["timer", "timeout"]) {
     if (job?.[key]) {
@@ -1143,6 +1345,7 @@ function queueStreamStep(session) {
       session.generation = null;
       session.adminTyping = false;
       persistMessage(session, message);
+      maybeGenerateMessageAudio(session, message);
       touch(session);
       return;
     }
@@ -1164,6 +1367,12 @@ function startStreamingReply(session, content, options = {}) {
     return false;
   }
 
+  message.audioAllowed = Boolean(options.generateAudio);
+  message.audioFile = null;
+  message.audioStatus = null;
+  message.audioError = null;
+  message.audioCreatedAt = null;
+  persistMessage(session, message);
   session.adminTyping = false;
   session.regenerateRequest = null;
   session.generation = {
@@ -1171,7 +1380,8 @@ function startStreamingReply(session, content, options = {}) {
     messageId: message.id,
     target: content,
     index: 0,
-    timer: null
+    timer: null,
+    generateAudio: Boolean(options.generateAudio)
   };
   touch(session);
   queueStreamStep(session);
@@ -1194,7 +1404,7 @@ function queueReply(session, content, delayMs, options = {}) {
   touch(session);
 
   if (delayMs <= 0) {
-    return startStreamingReply(session, content, { messageId });
+    return startStreamingReply(session, content, { messageId, generateAudio: options.generateAudio });
   }
 
   const timer = setTimeout(() => {
@@ -1203,7 +1413,7 @@ function queueReply(session, content, delayMs, options = {}) {
       return;
     }
     session.generation = null;
-    startStreamingReply(session, content, { messageId });
+    startStreamingReply(session, content, { messageId, generateAudio: options.generateAudio });
   }, delayMs);
 
   session.generation = {
@@ -1211,7 +1421,8 @@ function queueReply(session, content, delayMs, options = {}) {
     messageId,
     target: content,
     index: 0,
-    timer
+    timer,
+    generateAudio: Boolean(options.generateAudio)
   };
   session.pendingTimers.add(timer);
   return true;
@@ -1974,7 +2185,10 @@ async function sendAdminReply(request, reply) {
   }
 
   const delayMs = Math.max(0, Math.min(Number(body.delayMs || 0), 8000));
-  const queued = queueReply(session, content, delayMs, { messageId: currentReplyTargetId(session) });
+  const queued = queueReply(session, content, delayMs, {
+    messageId: currentReplyTargetId(session),
+    generateAudio: true
+  });
   if (!queued) {
     sendError(reply, 409, "这个问题已经有回复了，不能再补第二条。");
     return;
@@ -2001,12 +2215,10 @@ async function revealPrank(request, reply) {
 
   stopActiveGeneration(session, "stopped");
   clearAdminDraft(session);
-  const message = createMessage(
-    "assistant",
-    "我摊牌了，我可是魔丸。你以为刚才是在和大模型聊天？其实一直有人在后台手动接招。欢迎来到魔丸整蛊现场。"
-  );
+  const message = createMessage("assistant", "你个呆瓜，我可不是AI！", { audioAllowed: true });
   session.messages.push(message);
   persistMessage(session, message);
+  maybeGenerateMessageAudio(session, message);
   session.revealed = true;
   clearManualTyping(session);
   touch(session);
@@ -2030,6 +2242,7 @@ function registerRoutes(app) {
   app.post("/api/chat/:sessionId/messages", postChatMessage);
   app.post("/api/chat/:sessionId/stop", stopChatGeneration);
   app.post("/api/chat/:sessionId/regenerate", requestRegenerate);
+  app.get("/api/audio/:fileName", sendAudioFile);
 
   app.get("/api/admin/sessions", { preHandler: requireAdmin }, getAdminSessions);
   app.get("/api/admin/events", { preHandler: requireAdmin }, streamAdminEvents);

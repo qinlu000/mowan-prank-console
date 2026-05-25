@@ -151,6 +151,24 @@ function createMessageRow(message, session) {
   content.textContent = message.content;
 
   bubble.append(meta, content);
+  if (message.role === "assistant" && message.audioUrl) {
+    const audio = document.createElement("audio");
+    audio.className = "message-audio";
+    audio.controls = true;
+    audio.preload = "none";
+    audio.src = message.audioUrl;
+    bubble.append(audio);
+  } else if (message.role === "assistant" && message.audioStatus === "generating") {
+    const audioStatus = document.createElement("div");
+    audioStatus.className = "message-audio-status";
+    audioStatus.textContent = "正在生成语音";
+    bubble.append(audioStatus);
+  } else if (message.role === "assistant" && message.audioStatus === "error") {
+    const audioStatus = document.createElement("div");
+    audioStatus.className = "message-audio-status";
+    audioStatus.textContent = "语音生成失败";
+    bubble.append(audioStatus);
+  }
   row.append(bubble);
   return row;
 }
@@ -257,7 +275,9 @@ function renderActiveSession(session) {
   renderReferencePanel(session);
 
   const signature = JSON.stringify({
-    ids: session.messages.map((message) => `${message.id}:${message.content}:${message.status}`),
+    ids: session.messages.map(
+      (message) => `${message.id}:${message.content}:${message.status}:${message.audioStatus || ""}:${message.audioUrl || ""}`
+    ),
     typing: session.adminTyping,
     generating: session.isGenerating,
     replyMode,

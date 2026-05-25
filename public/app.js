@@ -29,6 +29,7 @@ let isSending = false;
 let isIdentifying = false;
 let latestSession = null;
 let eventSource = null;
+const playedAudioUrls = new Set();
 
 for (const key of legacyStorageKeys) {
   localStorage.removeItem(key);
@@ -259,6 +260,25 @@ function createBubble(message) {
     message.status === "streaming" && !message.content ? "正在生成回复" : message.content;
 
   bubble.append(meta, content);
+  if (message.role === "assistant" && message.audioUrl) {
+    const audio = document.createElement("audio");
+    audio.className = "message-audio";
+    audio.controls = true;
+    audio.preload = "none";
+    audio.src = message.audioUrl;
+    if (message.audioAllowed && !playedAudioUrls.has(message.audioUrl)) {
+      playedAudioUrls.add(message.audioUrl);
+      setTimeout(() => {
+        audio.play().catch(() => {});
+      }, 250);
+    }
+    bubble.append(audio);
+  } else if (message.role === "assistant" && message.audioStatus === "generating") {
+    const audioStatus = document.createElement("div");
+    audioStatus.className = "message-audio-status";
+    audioStatus.textContent = "正在生成语音";
+    bubble.append(audioStatus);
+  }
   row.append(bubble);
   return row;
 }
@@ -314,7 +334,9 @@ function render(session) {
 
   const signature = JSON.stringify({
     id: session.id,
-    ids: session.messages.map((message) => `${message.id}:${message.content}:${message.status}`),
+    ids: session.messages.map(
+      (message) => `${message.id}:${message.content}:${message.status}:${message.audioStatus || ""}:${message.audioUrl || ""}`
+    ),
     typing: session.typing,
     isGenerating: session.isGenerating,
     canRegenerate: session.canRegenerate

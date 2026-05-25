@@ -7,9 +7,10 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "check": "node --check server.js && node --check public/app.js && node --check public/admin.js && node --check public/admin-login.js && node --check scripts/create-production-env.js && node --check scripts/sqlite-backup.js",
+    "check": "node --check server.js && node --check public/app.js && node --check public/admin.js && node --check public/admin-login.js && node --check scripts/create-production-env.js && node --check scripts/sqlite-backup.js && node --check scripts/qwen-voice-clone.js",
     "doctor": "node scripts/doctor.js",
-    "create:env": "node scripts/create-production-env.js"
+    "create:env": "node scripts/create-production-env.js",
+    "clone:voice": "node scripts/qwen-voice-clone.js"
   },
   "engines": {
     "node": ">=22"

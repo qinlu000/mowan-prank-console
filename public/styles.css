@@ -452,18 +452,13 @@ input:focus {
 }
 
 .chat-page .message-row.assistant::before {
-  content: "A";
+  content: "";
   width: 28px;
   height: 28px;
   flex: 0 0 28px;
-  display: inline-grid;
-  place-items: center;
   border: 1px solid var(--line);
   border-radius: 8px;
-  color: #ffffff;
-  background: var(--text);
-  font-size: 0.78rem;
-  font-weight: 700;
+  background: #ffffff url("/mowan-avatar.jpg") center / cover no-repeat;
 }
 
 .message-row.user {
@@ -548,6 +543,19 @@ input:focus {
   margin-bottom: 6px;
   color: var(--muted);
   font-size: 0.75rem;
+}
+
+.message-audio {
+  display: block;
+  width: min(100%, 320px);
+  height: 34px;
+  margin-top: 10px;
+}
+
+.message-audio-status {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 
 .typing {

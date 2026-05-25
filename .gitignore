@@ -8,6 +8,12 @@ dist/
 coverage/
 data/
 backups/
+voice-samples/
+魔丸音频/
+*.wav
+*.mp3
+*.m4a
+*.wma
 .DS_Store
 Thumbs.db
 *.zip
