@@ -11,6 +11,9 @@ importers:
       fastify:
         specifier: ^5.8.5
         version: 5.8.5
+      ws:
+        specifier: ^8.21.0
+        version: 8.21.0
 
 packages:
 
@@ -180,6 +183,18 @@ packages:
   toad-cache@3.7.1:
     resolution: {integrity: sha512-5DXWzE4Vz7xNHsv+xQ+MGfJYyC78Aok3tEr0MNwHoRf7vZnga1mQXZ4/Nsodld4VR6Wd+VhfmqnNrsRJyYPfrQ==}
     engines: {node: '>=20'}
+
+  ws@8.21.0:
+    resolution: {integrity: sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
 
 snapshots:
 
@@ -356,3 +371,5 @@ snapshots:
       real-require: 1.0.0
 
   toad-cache@3.7.1: {}
+
+  ws@8.21.0: {}

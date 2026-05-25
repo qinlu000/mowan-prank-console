@@ -199,8 +199,14 @@ async function main() {
   if (result.requestId) {
     console.log(`Request ID: ${result.requestId}`);
   }
-  console.log(`QWEN_TTS_CLONE_MODEL=${args.model}`);
-  console.log(`QWEN_TTS_VOICE=${result.voice}`);
+  if (args.model.includes("realtime")) {
+    console.log(`QWEN_TTS_MODE=realtime`);
+    console.log(`QWEN_TTS_REALTIME_MODEL=${args.model}`);
+    console.log(`QWEN_TTS_REALTIME_VOICE=${result.voice}`);
+  } else {
+    console.log(`QWEN_TTS_CLONE_MODEL=${args.model}`);
+    console.log(`QWEN_TTS_VOICE=${result.voice}`);
+  }
 }
 
 main().catch((error) => {

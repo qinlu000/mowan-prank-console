@@ -3,12 +3,17 @@ const path = require("node:path");
 const { createHash, createHmac, randomUUID, scryptSync, timingSafeEqual } = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
 const fastify = require("fastify");
+const WebSocket = require("ws");
 
 loadEnvFile(path.resolve(__dirname, ".env"));
 
 const generatedAdminPassword = randomUUID().slice(0, 12);
 const configuredAdminPassword =
   process.env.ADMIN_PASSWORD || process.env.FIRST_ADMIN_PASSWORD || generatedAdminPassword;
+const dashScopeApiKey = process.env.DASHSCOPE_API_KEY || process.env.QWEN_TTS_API_KEY || "";
+const qwenTtsMode = normalizeTtsMode(process.env.QWEN_TTS_MODE || "non_realtime");
+const qwenTtsVoice = process.env.QWEN_TTS_VOICE || "";
+const qwenTtsRealtimeVoice = process.env.QWEN_TTS_REALTIME_VOICE || "";
 
 const config = {
   host: process.env.HOST || "127.0.0.1",
@@ -37,14 +42,24 @@ const config = {
   llmRetryCount: Number(process.env.LLM_RETRY_COUNT || 2),
   llmFallbackReply:
     process.env.LLM_FALLBACK_REPLY || "我刚刚有点卡住了。你换个问法再发我一次，我继续接。",
-  dashScopeApiKey: process.env.DASHSCOPE_API_KEY || process.env.QWEN_TTS_API_KEY || "",
+  dashScopeApiKey,
   qwenTtsRegion: process.env.QWEN_TTS_REGION || "beijing",
+  qwenTtsMode,
   qwenTtsModel: process.env.QWEN_TTS_MODEL || process.env.QWEN_TTS_CLONE_MODEL || "qwen3-tts-vc-2026-01-22",
-  qwenTtsVoice: process.env.QWEN_TTS_VOICE || "",
+  qwenTtsVoice,
+  qwenTtsRealtimeModel:
+    process.env.QWEN_TTS_REALTIME_MODEL || "qwen3-tts-vc-realtime-2026-01-15",
+  qwenTtsRealtimeVoice,
+  qwenTtsRealtimeControls: process.env.QWEN_TTS_REALTIME_CONTROLS === "true",
+  qwenTtsSpeechRate: readNumber(process.env.QWEN_TTS_SPEECH_RATE, 1),
+  qwenTtsPitchRate: readNumber(process.env.QWEN_TTS_PITCH_RATE, 1),
+  qwenTtsVolume: readNumber(process.env.QWEN_TTS_VOLUME, 50),
+  qwenTtsSampleRate: readNumber(process.env.QWEN_TTS_SAMPLE_RATE, 24000),
+  qwenTtsTimeoutMs: readNumber(process.env.QWEN_TTS_TIMEOUT_MS, 45000),
   qwenTtsEnabled:
     process.env.QWEN_TTS_ENABLED !== "false" &&
-    Boolean(process.env.DASHSCOPE_API_KEY || process.env.QWEN_TTS_API_KEY) &&
-    Boolean(process.env.QWEN_TTS_VOICE),
+    Boolean(dashScopeApiKey) &&
+    Boolean(qwenTtsMode === "realtime" ? qwenTtsRealtimeVoice : qwenTtsVoice),
   audioDir: path.resolve(__dirname, process.env.AUDIO_DIR || "data/audio")
 };
 
@@ -97,6 +112,17 @@ function loadEnvFile(filePath) {
       process.env[key] = value;
     }
   }
+}
+
+function normalizeTtsMode(value) {
+  return String(value).toLowerCase().replace(/-/g, "_") === "realtime"
+    ? "realtime"
+    : "non_realtime";
+}
+
+function readNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function now() {
@@ -1119,6 +1145,18 @@ function qwenTtsGenerationUrl() {
   return `${host}/api/v1/services/aigc/multimodal-generation/generation`;
 }
 
+function qwenTtsRealtimeUrl() {
+  const host =
+    String(config.qwenTtsRegion).toLowerCase() === "singapore"
+      ? "wss://dashscope-intl.aliyuncs.com"
+      : "wss://dashscope.aliyuncs.com";
+  return `${host}/api-ws/v1/realtime?model=${encodeURIComponent(config.qwenTtsRealtimeModel)}`;
+}
+
+function qwenTtsActiveModel() {
+  return config.qwenTtsMode === "realtime" ? config.qwenTtsRealtimeModel : config.qwenTtsModel;
+}
+
 function audioExtensionFromResponse(response, audioUrl) {
   const type = String(response.headers.get("content-type") || "").toLowerCase();
   if (type.includes("mpeg") || type.includes("mp3")) {
@@ -1131,7 +1169,7 @@ function audioExtensionFromResponse(response, audioUrl) {
   return mimeTypes.has(ext) ? ext : ".wav";
 }
 
-async function requestQwenTts(text) {
+async function requestQwenBatchTts(text) {
   const response = await fetch(qwenTtsGenerationUrl(), {
     method: "POST",
     headers: {
@@ -1160,7 +1198,182 @@ async function requestQwenTts(text) {
   if (!audioUrl) {
     throw new Error("DashScope TTS did not return an audio URL.");
   }
-  return audioUrl;
+  return { type: "remote", url: audioUrl };
+}
+
+function qwenRealtimeSessionConfig() {
+  const session = {
+    voice: config.qwenTtsRealtimeVoice,
+    mode: "commit",
+    language_type: "Chinese",
+    response_format: "pcm",
+    sample_rate: config.qwenTtsSampleRate
+  };
+
+  if (config.qwenTtsRealtimeControls) {
+    session.speech_rate = config.qwenTtsSpeechRate;
+    session.pitch_rate = config.qwenTtsPitchRate;
+    session.volume = config.qwenTtsVolume;
+  }
+
+  return session;
+}
+
+function pcm16MonoToWav(pcm, sampleRate) {
+  const header = Buffer.alloc(44);
+  const byteRate = sampleRate * 2;
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
+
+async function requestQwenRealtimeTts(text) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let settled = false;
+    let finishSent = false;
+    let sawAudioDone = false;
+    let timeout = null;
+    const ws = new WebSocket(qwenTtsRealtimeUrl(), {
+      headers: {
+        Authorization: `Bearer ${config.dashScopeApiKey}`
+      }
+    });
+
+    const settle = (error, audio = null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      try {
+        ws.close();
+      } catch {
+        // Best effort cleanup after a failed realtime request.
+      }
+      if (error) {
+        reject(error);
+      } else {
+        resolve(audio);
+      }
+    };
+
+    const sendEvent = (event) => {
+      ws.send(JSON.stringify({ event_id: randomUUID(), ...event }));
+    };
+
+    const sendFinish = () => {
+      if (finishSent || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      finishSent = true;
+      sendEvent({ type: "session.finish" });
+    };
+
+    timeout = setTimeout(() => {
+      settle(new Error("DashScope realtime TTS timed out."));
+    }, config.qwenTtsTimeoutMs);
+
+    ws.on("open", () => {
+      sendEvent({
+        type: "session.update",
+        session: qwenRealtimeSessionConfig()
+      });
+    });
+
+    ws.on("message", (data) => {
+      const textData = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
+      const event = parseJson(textData, null);
+      if (!event) {
+        return;
+      }
+
+      if (event.type === "error") {
+        const message = event.error?.message || event.message || "DashScope realtime TTS error.";
+        settle(new Error(message));
+        return;
+      }
+
+      if (event.type === "session.updated") {
+        sendEvent({ type: "input_text_buffer.append", text });
+        sendEvent({ type: "input_text_buffer.commit" });
+        return;
+      }
+
+      if (event.type === "response.audio.delta" && event.delta) {
+        chunks.push(Buffer.from(event.delta, "base64"));
+        return;
+      }
+
+      if (event.type === "response.audio.done") {
+        sawAudioDone = true;
+        sendFinish();
+        return;
+      }
+
+      if (event.type === "response.done") {
+        const status = event.response?.status;
+        if (status && status !== "completed") {
+          const message =
+            event.response?.status_details?.error?.message ||
+            event.response?.status_details?.message ||
+            `DashScope realtime TTS finished with status ${status}.`;
+          settle(new Error(message));
+          return;
+        }
+        sendFinish();
+        return;
+      }
+
+      if (event.type === "session.finished") {
+        if (!chunks.length) {
+          settle(new Error("DashScope realtime TTS did not return audio data."));
+          return;
+        }
+        settle(null, {
+          type: "buffer",
+          ext: ".wav",
+          bytes: pcm16MonoToWav(Buffer.concat(chunks), config.qwenTtsSampleRate)
+        });
+      }
+    });
+
+    ws.on("close", () => {
+      if (settled) {
+        return;
+      }
+      if (sawAudioDone && chunks.length) {
+        settle(null, {
+          type: "buffer",
+          ext: ".wav",
+          bytes: pcm16MonoToWav(Buffer.concat(chunks), config.qwenTtsSampleRate)
+        });
+        return;
+      }
+      settle(new Error("DashScope realtime TTS connection closed before audio completed."));
+    });
+
+    ws.on("error", (error) => {
+      settle(error);
+    });
+  });
+}
+
+async function requestQwenTts(text) {
+  return config.qwenTtsMode === "realtime" ? requestQwenRealtimeTts(text) : requestQwenBatchTts(text);
 }
 
 async function saveRemoteAudio(audioUrl, messageId) {
@@ -1170,12 +1383,23 @@ async function saveRemoteAudio(audioUrl, messageId) {
   }
 
   const ext = audioExtensionFromResponse(response, audioUrl);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  return saveAudioBytes(bytes, messageId, ext);
+}
+
+async function saveAudioBytes(bytes, messageId, ext) {
   const fileName = `${messageId}${ext}`;
   const filePath = path.join(config.audioDir, fileName);
-  const bytes = Buffer.from(await response.arrayBuffer());
   await fs.promises.mkdir(config.audioDir, { recursive: true });
   await fs.promises.writeFile(filePath, bytes);
   return fileName;
+}
+
+async function saveQwenAudio(audio, messageId) {
+  if (audio.type === "remote") {
+    return saveRemoteAudio(audio.url, messageId);
+  }
+  return saveAudioBytes(audio.bytes, messageId, audio.ext || ".wav");
 }
 
 function shouldGenerateAudio(message) {
@@ -1203,7 +1427,7 @@ function maybeGenerateMessageAudio(session, message) {
   touch(session);
 
   requestQwenTts(message.content)
-    .then((audioUrl) => saveRemoteAudio(audioUrl, message.id))
+    .then((audio) => saveQwenAudio(audio, message.id))
     .then((fileName) => {
       const current = session.messages.find((item) => item.id === message.id);
       if (!current) {
@@ -1218,7 +1442,7 @@ function maybeGenerateMessageAudio(session, message) {
       recordAuditLog("tts_audio_created", {
         sessionId: session.id,
         actor: "魔丸",
-        detail: { model: config.qwenTtsModel, messageId: current.id }
+        detail: { model: qwenTtsActiveModel(), mode: config.qwenTtsMode, messageId: current.id }
       });
       touch(session);
     })
@@ -1234,7 +1458,12 @@ function maybeGenerateMessageAudio(session, message) {
       recordAuditLog("tts_audio_error", {
         sessionId: session.id,
         actor: "魔丸",
-        detail: { model: config.qwenTtsModel, messageId: current.id, message: error.message }
+        detail: {
+          model: qwenTtsActiveModel(),
+          mode: config.qwenTtsMode,
+          messageId: current.id,
+          message: error.message
+        }
       });
       touch(session);
     });
